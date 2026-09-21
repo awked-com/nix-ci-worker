@@ -20,22 +20,24 @@ type cacheRoundTripper func(*http.Request) (*http.Response, error)
 func (f cacheRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type registryFixture struct {
-	mu                             sync.Mutex
-	payload                        []byte
-	requests                       []string
-	tokenRequests                  int
-	rejectToken, corrupt, truncate bool
-	status                         int
-	redirect                       string
-	rangeFault                     string
-	uploads                        map[string][]byte
-	blobs                          map[string][]byte
-	rejected                       map[string]bool
-	rateLimit                      bool
-	failWrite                      int
-	slow                           bool
-	blockUploads                   bool
-	started, release               chan struct{}
+	mu                                   sync.Mutex
+	payload                              []byte
+	requests                             []string
+	tokenRequests                        int
+	rejectToken, corrupt, truncate       bool
+	status                               int
+	redirect                             string
+	rangeFault                           string
+	uploads                              map[string][]byte
+	blobs                                map[string][]byte
+	rejected                             map[string]bool
+	rateLimit                            bool
+	failWrite                            int
+	completionStatus, completionFailures int
+	commitFailure                        bool
+	slow                                 bool
+	blockUploads                         bool
+	started, release                     chan struct{}
 }
 
 func newRegistryFixture(t *testing.T) (*registryFixture, *Registry) {
@@ -96,6 +98,18 @@ func (f *registryFixture) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == "HEAD" {
+		data, ok := f.blobs[r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]]
+		f.mu.Unlock()
+		if !ok {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		w.Header().Set("Docker-Content-Digest", contentDigest(data))
+		w.WriteHeader(200)
+		return
+	}
 	if r.Method != "GET" {
 		key := r.Method + " " + r.URL.Path
 		if f.failWrite != 0 {
@@ -140,6 +154,13 @@ func (f *registryFixture) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			if f.completionFailures > 0 && !f.commitFailure {
+				f.completionFailures--
+				status := f.completionStatus
+				f.mu.Unlock()
+				http.Error(w, "sensitive backend body", status)
+				return
+			}
 			f.uploads[r.URL.Path] = append(f.uploads[r.URL.Path], body...)
 			data := f.uploads[r.URL.Path]
 			digest := r.URL.Query().Get("digest")
@@ -150,6 +171,13 @@ func (f *registryFixture) serve(w http.ResponseWriter, r *http.Request) {
 			}
 
 			f.blobs[digest] = append([]byte{}, data...)
+			if f.completionFailures > 0 {
+				f.completionFailures--
+				status := f.completionStatus
+				f.mu.Unlock()
+				http.Error(w, "sensitive backend body", status)
+				return
+			}
 			f.mu.Unlock()
 			w.WriteHeader(201)
 			return
@@ -832,5 +860,87 @@ func TestRegistryScopesPoolCredentials(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func TestRegistryRecoversBlobCompletion(t *testing.T) {
+	for _, status := range []int{500, 502, 503, 504} {
+		for _, committed := range []bool{false, true} {
+			for _, large := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%d/committed=%v/large=%v", status, committed, large), func(t *testing.T) {
+					fixture, registry := newRegistryFixture(t)
+					registry.auth = RegistryCredential("user", "token")
+					now := time.Unix(1000, 0)
+					registry.now = func() time.Time { return now }
+					registry.sleep = func(delay time.Duration) { now = now.Add(delay) }
+					registry.jitter = func() time.Duration { return 0 }
+					fixture.completionStatus, fixture.completionFailures, fixture.commitFailure = status, 1, committed
+					payload := []byte("age-encryption.org/v1\nprivate payload")
+					if large {
+						payload = append(payload, bytes.Repeat([]byte("x"), UploadChunkSize)...)
+					}
+					descriptor, err := registry.UploadBlob(cacheTestRepository, bytes.NewReader(payload), true)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(fixture.blobs[descriptor.Digest], payload) || descriptor.Size != int64(len(payload)) {
+						t.Fatal("completion recovery corrupted blob")
+					}
+					puts := 0
+					for _, request := range fixture.requests {
+						if strings.HasPrefix(request, "PUT ") {
+							puts++
+						}
+					}
+					want := 2
+					if committed {
+						want = 1
+					}
+					if puts != want {
+						t.Fatalf("completion requests: got %d, want %d", puts, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRegistryCompletionRetryBounds(t *testing.T) {
+	fixture, registry := newRegistryFixture(t)
+	registry.auth = RegistryCredential("user", "token")
+	now := time.Unix(1000, 0)
+	registry.now = func() time.Time { return now }
+	registry.sleep = func(delay time.Duration) { now = now.Add(delay) }
+	registry.jitter = func() time.Duration { return 0 }
+	fixture.completionStatus, fixture.completionFailures = 500, 100
+	_, err := registry.UploadBlob(cacheTestRepository, strings.NewReader("{}"), false)
+	var upload *UploadError
+	if !errors.As(err, &upload) || upload.Status != 500 || fixture.completionFailures != 91 || now.Sub(time.Unix(1000, 0)) >= 600*time.Second {
+		t.Fatalf("unexpected completion retry outcome: %v, failures left %d", err, fixture.completionFailures)
+	}
+}
+
+func TestRegistryRejectsMismatchedCompletedBlob(t *testing.T) {
+	for _, header := range []string{"Content-Length", "Docker-Content-Digest"} {
+		t.Run(header, func(t *testing.T) {
+			fixture, registry := newRegistryFixture(t)
+			registry.auth = RegistryCredential("user", "token")
+			now := time.Unix(1000, 0)
+			registry.now = func() time.Time { return now }
+			registry.sleep = func(delay time.Duration) { now = now.Add(delay) }
+			registry.jitter = func() time.Duration { return 0 }
+			fixture.completionStatus, fixture.completionFailures, fixture.commitFailure = 500, 1, true
+			transport := registry.UploadHTTP.Transport
+			registry.UploadHTTP.Transport = cacheRoundTripper(func(request *http.Request) (*http.Response, error) {
+				response, err := transport.RoundTrip(request)
+				if err == nil && request.Method == "HEAD" {
+					response.Header.Set(header, "0")
+				}
+				return response, err
+			})
+			if _, err := registry.UploadBlob(cacheTestRepository, strings.NewReader("{}"), false); err == nil {
+				t.Fatal("accepted mismatched blob metadata")
+			}
+		})
 	}
 }

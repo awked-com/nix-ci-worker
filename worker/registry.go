@@ -314,6 +314,10 @@ func (r *Registry) HTTPRequest(endpoint, method string, headers http.Header, dat
 }
 
 func (r *Registry) retryUpload(operation func() error) error {
+	return r.retryPublication(operation, false)
+}
+
+func (r *Registry) retryPublication(operation func() error, completion bool) error {
 	deadline := r.now().Add(600 * time.Second)
 	var last error = &UploadError{
 		Status:    429,
@@ -341,7 +345,7 @@ func (r *Registry) retryUpload(operation func() error) error {
 		}
 
 		var upload *UploadError
-		if !errors.As(err, &upload) || upload.Status != 429 {
+		if !errors.As(err, &upload) || (upload.Status != 429 && !(completion && transientUploadStatus(upload.Status))) {
 			return err
 		}
 
@@ -602,20 +606,6 @@ func (r *Registry) UploadBlob(repository string, source io.Reader, encrypted boo
 		return empty, err
 	}
 
-	if len(next) == 0 {
-		digest := contentDigest(first)
-		u, _ := url.Parse(location)
-		query := u.Query()
-		query.Set("digest", digest)
-		u.RawQuery = query.Encode()
-		_, _, err = r.writeRequest(repository, u.String(), "PUT", http.Header{"Content-Type": {"application/octet-stream"}}, first, 201)
-		return Descriptor{
-			Digest:    digest,
-			Size:      int64(len(first)),
-			MediaType: "application/octet-stream",
-		}, err
-	}
-
 	checksum := sha256.New()
 	var size int64
 
@@ -674,12 +664,42 @@ func (r *Registry) UploadBlob(repository string, source io.Reader, encrypted boo
 	query := u.Query()
 	query.Set("digest", digest)
 	u.RawQuery = query.Encode()
-	_, _, err = r.writeRequest(repository, u.String(), "PUT", nil, nil, 201)
+	err = r.completeBlob(repository, base, u.String(), digest, size)
 	return Descriptor{
 		Digest:    digest,
 		Size:      size,
 		MediaType: "application/octet-stream",
 	}, err
+}
+
+func transientUploadStatus(status int) bool {
+	return status == 500 || status == 502 || status == 503 || status == 504
+}
+
+func (r *Registry) completeBlob(repository, base, endpoint, digest string, size int64) error {
+	// All bytes have been PATCHed. Retrying an empty completion cannot append
+	// data twice. A failed response may still have committed the blob, so check
+	// its content address before trying the upload session again.
+	check := false
+	return r.retryPublication(func() error {
+		if check {
+			headers, _, err := r.writeRequest(repository, base+"/blobs/"+digest, "HEAD", nil, nil, 200)
+			if err == nil {
+				length, parseErr := strconv.ParseInt(headers.Get("Content-Length"), 10, 64)
+				if parseErr != nil || length != size || headers.Get("Docker-Content-Digest") != digest {
+					return errors.New("completed blob digest or size mismatch")
+				}
+				return nil
+			}
+			var upload *UploadError
+			if !errors.As(err, &upload) || upload.Status != 404 {
+				return err
+			}
+		}
+		_, _, err := r.writeRequest(repository, endpoint, "PUT", nil, nil, 201)
+		check = true
+		return err
+	}, true)
 }
 
 func (r *Registry) PutManifest(repository, tag string, manifest Manifest) (string, error) {
