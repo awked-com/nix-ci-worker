@@ -213,3 +213,57 @@ func TestRetentionPreservesArchivesUsedByExistingNodeClients(t *testing.T) {
 		}
 	}
 }
+
+type checkedRetentionStorage struct {
+	Storage
+	armed         bool
+	candidateRead chan struct{}
+	latestError   error
+}
+
+func (s *checkedRetentionStorage) ManifestDigest(repository, reference string) (string, error) {
+	if s.armed {
+		select {
+		case <-s.candidateRead:
+		case <-time.After(time.Second):
+			return "", errors.New("candidate read did not overlap latest check")
+		}
+		if s.latestError != nil {
+			return "", s.latestError
+		}
+	}
+	return s.Storage.ManifestDigest(repository, reference)
+}
+
+func TestRetentionOverlapsChecksAndStopsOnEitherFailure(t *testing.T) {
+	for _, failure := range []string{"", "latest", "candidate"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newRetentionFixture()
+			f.add(1, []string{}, map[string]any{"kind": "commit", "run": "1"})
+			storage := &checkedRetentionStorage{Storage: retentionStorage{fixture: f}, candidateRead: make(chan struct{})}
+			if failure == "latest" {
+				storage.latestError = errors.New("latest lookup failed")
+			}
+			api := func(path, method string) (any, error) {
+				if path == "users/test/packages/container/infra-ci-pool" {
+					storage.armed = true
+				}
+				if storage.armed && strings.HasSuffix(path, "/versions/1") && method == "GET" {
+					close(storage.candidateRead)
+					if failure == "candidate" {
+						return nil, errors.New("candidate lookup failed")
+					}
+				}
+				return f.api(path, method)
+			}
+			deleted, err := Prune(api, storage, cacheTestRepository, "", io.Discard)
+			if failure == "" {
+				if err != nil || deleted != 1 {
+					t.Fatal(deleted, err)
+				}
+			} else if err == nil || deleted != 0 || len(f.deleted) != 0 {
+				t.Fatal("deleted after failed check", deleted, err)
+			}
+		})
+	}
+}

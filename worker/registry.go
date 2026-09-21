@@ -97,6 +97,7 @@ type Manifest struct {
 }
 
 type Storage interface {
+	ManifestDigest(repository, reference string) (string, error)
 	GetManifest(repository, reference string) (Manifest, string, error)
 	PutManifest(repository, tag string, manifest Manifest) (string, error)
 	UploadBlob(repository string, source io.Reader, encrypted bool) (Descriptor, error)
@@ -464,7 +465,7 @@ func (r *Registry) WriteToken(repository, rejected string) (string, error) {
 	return r.token(repository, rejected, true)
 }
 
-func (r *Registry) registryResponse(repository, path string, headers http.Header) (*http.Response, error) {
+func (r *Registry) registryResponse(repository, path, method string, headers http.Header) (*http.Response, error) {
 	token, err := r.Token(repository, "")
 	if err != nil {
 		return nil, err
@@ -477,7 +478,7 @@ func (r *Registry) registryResponse(repository, path string, headers http.Header
 		}
 		h.Set("Authorization", "Bearer "+token)
 		h.Set("Accept", manifestMediaType)
-		response, err := r.response("GET", "https://"+strings.Replace(repository, "ghcr.io/", "ghcr.io/v2/", 1)+path, h, nil, true)
+		response, err := r.response(method, "https://"+strings.Replace(repository, "ghcr.io/", "ghcr.io/v2/", 1)+path, h, nil, true)
 		if err != nil {
 			return nil, err
 		}
@@ -736,6 +737,27 @@ func (r *Registry) PutManifest(repository, tag string, manifest Manifest) (strin
 	return contentDigest(data), nil
 }
 
+// ManifestDigest checks a mutable tag without transferring its layer inventory.
+func (r *Registry) ManifestDigest(repository, reference string) (string, error) {
+	path, err := ManifestPath(reference)
+	if err != nil {
+		return "", err
+	}
+	response, err := r.registryResponse(repository, path, "HEAD", nil)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		return "", fmt.Errorf("registry manifest lookup failed (HTTP %d)", response.StatusCode)
+	}
+	digest := response.Header.Get("Docker-Content-Digest")
+	if !digestPattern.MatchString(digest) || strings.HasPrefix(reference, "sha256:") && reference != digest {
+		return "", errors.New("invalid registry manifest digest")
+	}
+	return digest, nil
+}
+
 func (r *Registry) GetManifest(repository, reference string) (Manifest, string, error) {
 	var manifest Manifest
 	path, err := ManifestPath(reference)
@@ -743,7 +765,7 @@ func (r *Registry) GetManifest(repository, reference string) (Manifest, string, 
 		return manifest, "", err
 	}
 
-	response, err := r.registryResponse(repository, path, nil)
+	response, err := r.registryResponse(repository, path, "GET", nil)
 	if err != nil {
 		return manifest, "", err
 	}
@@ -827,7 +849,7 @@ func (r *Registry) blobRange(repository string, file SnapshotFile) (io.ReadClose
 
 	path := "/blobs/" + file.Blob.Digest
 	endpoint := "https://" + strings.Replace(repository, "ghcr.io/", "ghcr.io/v2/", 1) + path
-	response, err := r.registryResponse(repository, path, headers)
+	response, err := r.registryResponse(repository, path, "GET", headers)
 	if err != nil {
 		return nil, err
 	}

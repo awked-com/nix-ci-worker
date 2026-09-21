@@ -944,3 +944,52 @@ func TestRegistryRejectsMismatchedCompletedBlob(t *testing.T) {
 		})
 	}
 }
+
+func TestRegistryManifestDigestUsesFreshAuthenticatedHEAD(t *testing.T) {
+	registry := NewRegistry(Secret{})
+	defer registry.Close()
+	calls := 0
+	registry.HTTP.Transport = cacheRoundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/token" {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"token":"read-token"}`))}, nil
+		}
+		calls++
+		if request.Method != "HEAD" || request.Header.Get("Authorization") != "Bearer read-token" {
+			t.Fatal("incorrect lookup request")
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Docker-Content-Digest": {fmt.Sprintf("sha256:%064x", calls)}}, Body: http.NoBody}, nil
+	})
+	for i := 1; i <= 2; i++ {
+		digest, err := registry.ManifestDigest(cacheTestRepository, "nixos-cache-latest")
+		if err != nil || digest != fmt.Sprintf("sha256:%064x", i) {
+			t.Fatal("stale or invalid digest", digest, err)
+		}
+	}
+}
+
+func TestRegistryManifestDigestRejectsInvalidResponses(t *testing.T) {
+	for _, test := range []struct {
+		status    int
+		digest    string
+		reference string
+	}{
+		{200, "", "tag"}, {200, "malformed", "tag"},
+		{200, "sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64)},
+		{404, "", "tag"}, {500, "", "tag"},
+	} {
+		t.Run(fmt.Sprint(test.status, test.digest, test.reference), func(t *testing.T) {
+			registry := NewRegistry(Secret{})
+			defer registry.Close()
+			registry.HTTP.Transport = cacheRoundTripper(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == "/token" {
+					return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"token":"read-token"}`))}, nil
+				}
+				return &http.Response{StatusCode: test.status, Header: http.Header{"Docker-Content-Digest": {test.digest}}, Body: http.NoBody}, nil
+			})
+			_, err := registry.ManifestDigest(cacheTestRepository, test.reference)
+			if err == nil || test.status == 404 && !errors.Is(err, ErrObjectNotFound) {
+				t.Fatal("invalid lookup accepted", err)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,5 +72,29 @@ func BenchmarkRetentionPlanning(b *testing.B) {
 			}
 			b.ReportMetric(float64(delayed.requests.Load())/float64(b.N), "registry-requests/op")
 		})
+	}
+}
+
+func (s *delayedRetentionStorage) ManifestDigest(repository, reference string) (string, error) {
+	_, digest, err := s.GetManifest(repository, reference)
+	return digest, err
+}
+
+func BenchmarkRetentionDeletion(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		f, storage := publishedRetentionFixture(b, 100)
+		delayed := &delayedRetentionStorage{Storage: storage, delay: 2 * time.Millisecond}
+		api := func(path, method string) (any, error) {
+			if method == "DELETE" || strings.Contains(path, "/versions/") {
+				time.Sleep(2 * time.Millisecond)
+			}
+			return f.api(path, method)
+		}
+		b.StartTimer()
+		deleted, err := Prune(api, delayed, cacheTestRepository, "1", nil)
+		if err != nil || deleted != 100 {
+			b.Fatal(deleted, err)
+		}
 	}
 }

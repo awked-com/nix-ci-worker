@@ -284,3 +284,8 @@ func TestPoolRetentionNextRunCompletesInterruptedCleanup(t *testing.T) {
 		})
 	}
 }
+
+func (s poolRetentionStorage) ManifestDigest(repository, reference string) (string, error) {
+	_, digest, err := s.GetManifest(repository, reference)
+	return digest, err
+}

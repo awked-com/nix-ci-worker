@@ -902,3 +902,8 @@ func TestCredentialPipePassesSecretWithoutAFile(t *testing.T) {
 		t.Fatalf("callback failure lost: %v", err)
 	}
 }
+
+func (s *memoryCache) ManifestDigest(repository, reference string) (string, error) {
+	_, digest, err := s.GetManifest(repository, reference)
+	return digest, err
+}

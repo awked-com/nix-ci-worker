@@ -366,7 +366,7 @@ func TagRun(tag string) string {
 }
 
 func latestDigest(storage Storage, repository string) (string, error) {
-	_, digest, err := storage.GetManifest(repository, "nixos-cache-latest")
+	digest, err := storage.ManifestDigest(repository, "nixos-cache-latest")
 	if errors.Is(err, ErrObjectNotFound) {
 		return "", nil
 	}
@@ -629,16 +629,24 @@ func Prune(api GitHubAPI, storage Storage, repository, finalizingRun string, log
 
 	phase = "deleting cache versions"
 	for _, candidate := range plan.versions {
-		currentLatest, err := latestDigest(storage, repository)
-		if err != nil {
-			return deleted, err
+		// Overlap independent read checks, but keep deletes serial and wait for
+		// both checks before each mutation. No later candidate is prefetched.
+		var currentLatest string
+		var latestError error
+		checked := make(chan struct{})
+		go func() {
+			defer close(checked)
+			currentLatest, latestError = latestDigest(storage, repository)
+		}()
+		path := plan.endpoint + "/" + strconv.FormatInt(candidate.ID, 10)
+		value, err := api(path, "GET")
+		<-checked
+		if latestError != nil {
+			return deleted, latestError
 		}
 		if currentLatest != plan.latest {
 			return deleted, errors.New("latest cache changed during retention")
 		}
-
-		path := plan.endpoint + "/" + strconv.FormatInt(candidate.ID, 10)
-		value, err := api(path, "GET")
 		if err != nil {
 			return deleted, err
 		}

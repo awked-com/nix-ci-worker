@@ -414,3 +414,8 @@ func TestRetentionRejectsUnidentifiablePoolRecords(t *testing.T) {
 		})
 	}
 }
+
+func (s retentionStorage) ManifestDigest(repository, reference string) (string, error) {
+	_, digest, err := s.GetManifest(repository, reference)
+	return digest, err
+}

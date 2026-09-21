@@ -94,3 +94,8 @@ func TestPoolControlPackageCanBeRemovedWithoutLosingCache(t *testing.T) {
 		}
 	}
 }
+
+func (s *repositoryCache) ManifestDigest(repository, reference string) (string, error) {
+	_, digest, err := s.GetManifest(repository, reference)
+	return digest, err
+}
