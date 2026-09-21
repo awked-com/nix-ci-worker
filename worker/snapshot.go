@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	CatalogTitle   = "org.opencontainers.image.title"
-	CatalogLimit   = 256 * 1024 * 1024
-	SnapshotFormat = "infra-ci-snapshot"
+	CatalogTitle         = "org.opencontainers.image.title"
+	CatalogLimit         = 256 * 1024 * 1024
+	SnapshotFormat       = "infra-ci-snapshot"
+	poolSourceAnnotation = "com.awked.infra-ci.pool-source"
 )
 
 func ResultTag(run, system string, attempt int) string {
@@ -511,6 +512,11 @@ func (s *Snapshot) publish(tag string, recipients Secret, sourceRepository strin
 			"org.opencontainers.image.source": "https://github.com/" + strings.TrimPrefix(sourceRepository, "ghcr.io/"),
 			CatalogTitle:                      "NixOS binary cache",
 		},
+	}
+	if retention.Kind == "control" {
+		// Do not link PAT-created pool packages to the public workflow repository.
+		s.Manifest.Annotations[poolSourceAnnotation] = s.Manifest.Annotations["org.opencontainers.image.source"]
+		delete(s.Manifest.Annotations, "org.opencontainers.image.source")
 	}
 	if len(retentionJSON) != 0 {
 		s.Manifest.Annotations[retentionAnnotation] = string(retentionJSON)

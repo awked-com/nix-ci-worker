@@ -1365,6 +1365,10 @@ func RunWorker(log io.Writer) error {
 	recipientsText := takeEnv("CI_RECIPIENTS")
 	signingKey := Secret{Data: []byte(takeEnv("NIX_SIGNING_KEY"))}
 	token, user := takeEnv("REGISTRY_TOKEN"), takeEnv("REGISTRY_USER")
+	poolToken, poolUser := takeEnv("CI_POOL_TOKEN"), takeEnv("CI_POOL_USER")
+	if poolToken == "" || poolUser == "" {
+		return errors.New("missing dedicated pool credentials")
+	}
 	storage := NewRegistry(RegistryCredential(user, token))
 	defer storage.Close()
 
@@ -1373,7 +1377,13 @@ func RunWorker(log io.Writer) error {
 		return errors.New("worker repository mismatch")
 	}
 
+	storage.repositoryAuth = map[string]Secret{repository + "-pool": RegistryCredential(poolUser, poolToken)}
 	api := NewGitHub(token)
+	poolEndpoint, e := EndpointFor(api, repository+"-pool")
+	if e != nil {
+		return e
+	}
+	api = poolPackageAPI(api, NewGitHub(poolToken), strings.TrimSuffix(poolEndpoint, "/versions"))
 	workerRecipients, e := IdentityRecipients(identity)
 	if e != nil {
 		return e
@@ -1382,6 +1392,12 @@ func RunWorker(log io.Writer) error {
 	source := os.Getenv("INPUT_SOURCE_PATH")
 	if source == "" {
 		return errors.New("missing source checkout path")
+	}
+	if mode != "finalize" {
+		if e = preparePool(api, storage, repository, run, workerRecipients, mode == "admit"); e != nil {
+			fmt.Fprintln(log, "Builder pool unavailable: require a private, unlinked package accessible with CI_POOL_USER and CI_POOL_TOKEN.")
+			return e
+		}
 	}
 	var bus *poolBus
 	if mode == "build" || mode == "builder" {

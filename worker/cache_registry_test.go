@@ -808,3 +808,29 @@ func TestRegistryLongCooldownRefreshesExpiredWriteToken(t *testing.T) {
 		t.Fatal(tokens, used)
 	}
 }
+
+func TestRegistryScopesPoolCredentials(t *testing.T) {
+	registry := NewRegistry(RegistryCredential("workflow", "cache-token"))
+	defer registry.Close()
+	registry.repositoryAuth = map[string]Secret{cacheTestRepository + "-pool": RegistryCredential("pool-user", "pool-token")}
+	transport := cacheRoundTripper(func(request *http.Request) (*http.Response, error) {
+		user, token, ok := request.BasicAuth()
+		pool := strings.Contains(request.URL.Query().Get("scope"), "infra-ci-pool:")
+		wantUser, wantToken := "workflow", "cache-token"
+		if pool {
+			wantUser, wantToken = "pool-user", "pool-token"
+		}
+		if !ok || user != wantUser || token != wantToken {
+			t.Fatal("wrong credential for scope", request.URL.Query().Get("scope"))
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"token":"scoped","expires_in":300}`)), Request: request}, nil
+	})
+	registry.HTTP.Transport, registry.UploadHTTP.Transport = transport, transport
+	for _, repository := range []string{cacheTestRepository, cacheTestRepository + "-pool", cacheTestRepository + "-pool-other"} {
+		for _, write := range []bool{false, true} {
+			if _, err := registry.token(repository, "", write); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}

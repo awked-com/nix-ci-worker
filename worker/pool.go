@@ -94,6 +94,7 @@ func newPoolBus(storage Storage, repository, run, system string, attempt int, id
 	// Lease traffic must not wait behind large NAR uploads or their retry budget.
 	if registry, ok := storage.(*Registry); ok {
 		control := NewRegistry(registry.auth)
+		control.repositoryAuth = registry.repositoryAuth
 		control.HTTP.Timeout, control.UploadHTTP.Timeout = 30*time.Second, 30*time.Second
 		control.uploadRetries = 2
 		b.control, b.close = control, control.Close

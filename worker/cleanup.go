@@ -400,7 +400,11 @@ func inspectVersions(storage Storage, repository, sourceRepository string, versi
 					err = errors.New("retention manifest digest mismatch")
 				}
 				raw, marked := manifest.Annotations[retentionAnnotation]
-				owned := marked && manifest.Annotations["org.opencontainers.image.source"] == "https://github.com/"+strings.TrimPrefix(sourceRepository, "ghcr.io/")
+				sourceAnnotation := "org.opencontainers.image.source"
+				if repository == sourceRepository+"-pool" {
+					sourceAnnotation = poolSourceAnnotation
+				}
+				owned := marked && manifest.Annotations[sourceAnnotation] == "https://github.com/"+strings.TrimPrefix(sourceRepository, "ghcr.io/")
 				var record retentionRecord
 				if err == nil && owned {
 					decoder := json.NewDecoder(strings.NewReader(raw))

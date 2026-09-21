@@ -25,7 +25,6 @@ func (f *poolRetentionFixture) addPool(run string, count int) *retentionFixture 
 	if f.pool == nil {
 		f.packageInfo = map[string]any{
 			"id": 1, "name": "infra-ci-pool", "package_type": "container",
-			"repository": map[string]any{"full_name": "test/infra-ci"},
 		}
 		f.pool = &retentionFixture{}
 	}
@@ -36,6 +35,9 @@ func (f *poolRetentionFixture) addPool(run string, count int) *retentionFixture 
 			tags = append(tags, "nixos-cache-pool-"+run+"-1-aarch64-linux-status-2")
 		}
 		pool.add(int64(len(pool.versions)+1), tags, map[string]any{"kind": "control", "run": run})
+		manifest := pool.manifests[pool.versions[len(pool.versions)-1].Name]
+		manifest.Annotations[poolSourceAnnotation] = manifest.Annotations["org.opencontainers.image.source"]
+		delete(manifest.Annotations, "org.opencontainers.image.source")
 	}
 	return pool
 }
@@ -80,15 +82,16 @@ func TestPoolRetentionDeletesWholePackagesAndKeepsCache(t *testing.T) {
 	f := newPoolRetentionFixture()
 	f.active = []map[string]any{{"id": "12"}, {"id": "13"}}
 	f.recent = []map[string]any{{"id": "12"}, {"id": "13"}}
-	f.addPool("12", 205)
+	pool := f.addPool("12", 205)
+	pool.versions[0].Metadata.Container.Tags = []string{"nixos-cache-pool-12-bootstrap"}
 	f.addPool("1", 3) // Cancelled run outside the recent-run window.
 	storage := poolRetentionStorage{fixture: f}
 	deleted, err := Prune(f.api, storage, cacheTestRepository, "12", io.Discard)
 	if err != nil || deleted != 208 || !reflect.DeepEqual(f.deletedPackages, []string{"infra-ci-pool"}) {
 		t.Fatal(deleted, f.deletedPackages, err)
 	}
-	if len(f.deleted) != 0 {
-		t.Fatal("deleted cache data")
+	if len(f.deleted) != 0 || len(pool.deleted) != 0 {
+		t.Fatal("deleted individual cache or pool versions")
 	}
 	if _, _, err := storage.GetManifest(cacheTestRepository, "nixos-cache-latest"); err != nil {
 		t.Fatal("cache was lost with control messages", err)
@@ -110,12 +113,12 @@ func TestPoolRetentionProtectsPinsAndUnownedContents(t *testing.T) {
 			delete(p.manifests[p.versions[0].Name].Annotations, retentionAnnotation)
 		}},
 		{"foreign manifest", func(_ *poolRetentionFixture, p *retentionFixture) {
-			p.manifests[p.versions[0].Name].Annotations["org.opencontainers.image.source"] = "https://github.com/other/repo"
+			p.manifests[p.versions[0].Name].Annotations[poolSourceAnnotation] = "https://github.com/other/repo"
 		}},
 		{"cache data", func(_ *poolRetentionFixture, p *retentionFixture) {
 			p.manifests[p.versions[0].Name].Annotations[retentionAnnotation] = `{"kind":"pool","run":"12"}`
 		}},
-		{"unlinked package", func(f *poolRetentionFixture, _ *retentionFixture) { delete(f.packageInfo, "repository") }},
+
 		{"foreign package", func(f *poolRetentionFixture, _ *retentionFixture) {
 			f.packageInfo["repository"] = map[string]any{"full_name": "other/repo"}
 		}},
@@ -154,7 +157,7 @@ func TestPoolRetentionInvalidPlanDeletesNothing(t *testing.T) {
 }
 
 func TestPoolRetentionRechecksBeforeDeleting(t *testing.T) {
-	for _, change := range []string{"pin", "upload", "replace", "unlink", "tag run", "inventory error", "delete error"} {
+	for _, change := range []string{"pin", "upload", "replace", "link", "tag run", "inventory error", "delete error"} {
 		t.Run(change, func(t *testing.T) {
 			f := newPoolRetentionFixture()
 			p := f.addPool("12", 3)
@@ -171,8 +174,8 @@ func TestPoolRetentionRechecksBeforeDeleting(t *testing.T) {
 						p.add(4, []string{}, map[string]any{"kind": "control", "run": "12"})
 					case "replace":
 						f.packageInfo["id"] = 999
-					case "unlink":
-						delete(f.packageInfo, "repository")
+					case "link":
+						f.packageInfo["repository"] = map[string]any{"full_name": "test/infra-ci"}
 					case "inventory error":
 						p.changeInventory = true
 					}

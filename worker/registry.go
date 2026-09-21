@@ -139,6 +139,7 @@ type registryToken struct {
 
 type Registry struct {
 	auth                                Secret
+	repositoryAuth                      map[string]Secret
 	HTTP, UploadHTTP                    *http.Client
 	tokensMu, writeTokensMu, cooldownMu sync.Mutex
 	tokens, writeTokens                 map[string]registryToken
@@ -222,13 +223,13 @@ func readLimited(reader io.Reader, limit int) ([]byte, error) {
 	return b, nil
 }
 
-func (r *Registry) basicAuth() (string, error) {
+func basicAuth(credential Secret) (string, error) {
 	var config struct {
 		Auths map[string]struct {
 			Auth string `json:"auth"`
 		} `json:"auths"`
 	}
-	if err := json.Unmarshal(r.auth.Data, &config); err != nil {
+	if err := json.Unmarshal(credential.Data, &config); err != nil {
 		return "", errors.New("invalid registry authentication configuration")
 	}
 
@@ -368,10 +369,14 @@ func (r *Registry) token(repository, rejected string, write bool) (string, error
 		return "", err
 	}
 
+	credential := r.auth
+	if scoped, ok := r.repositoryAuth[repository]; ok {
+		credential = scoped
+	}
 	lock, tokens := &r.tokensMu, r.tokens
 	scope := "pull"
 	if write {
-		if len(r.auth.Data) == 0 {
+		if len(credential.Data) == 0 {
 			return "", errors.New("publishing requires GHCR write credentials")
 		}
 
@@ -392,8 +397,8 @@ func (r *Registry) token(repository, rejected string, write bool) (string, error
 		"scope":   {"repository:" + owner + "/" + packageName + ":" + scope},
 	}
 	headers := http.Header{}
-	if len(r.auth.Data) != 0 {
-		auth, err := r.basicAuth()
+	if len(credential.Data) != 0 {
+		auth, err := basicAuth(credential)
 		if err != nil {
 			return "", err
 		}

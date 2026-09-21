@@ -81,7 +81,8 @@ The workflow supplies these environment variables:
 | `CI_IDENTITY` | Age identity bytes, not a filename |
 | `CI_RECIPIENTS` | Newline-separated age recipients |
 | `NIX_SIGNING_KEY` | Final cache signing key for coordinators |
-| `REGISTRY_USER`, `REGISTRY_TOKEN` | Registry and GitHub API credentials |
+| `REGISTRY_USER`, `REGISTRY_TOKEN` | Cache registry and GitHub Actions API credentials |
+| `CI_POOL_USER`, `CI_POOL_TOKEN` | Dedicated pool account and classic PAT with `read:packages`, `write:packages`, and `delete:packages` |
 | `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` | Actions run identity |
 | `GITHUB_OUTPUT` | Actions output file used by admission |
 
@@ -89,6 +90,20 @@ The storage owner/package must match `GITHUB_REPOSITORY`. Admission emits the
 parent cache digest, attempt, coordinator matrix, helper matrix, and resolved
 source revision. Retry jobs with those admitted inputs. Finalization expects
 all admitted coordinators and performs retention before publication.
+
+The temporary `<cache-package>-pool` package must be private and unlinked from
+repositories. Supply `CI_POOL_USER` and `CI_POOL_TOKEN` as Actions secrets for all
+worker jobs, using an account allowed to create private organization packages
+(and authorize SSO if required). Pool requests use this credential; cache and
+Actions requests keep using `REGISTRY_TOKEN`. The pool uses a custom source
+annotation to avoid linking it to the public workflow repository. No package
+Actions-access grant is needed because runners authenticate with the pool PAT.
+Admission creates a bootstrap record without runner data and checks privacy
+before coordination. Finalization deletes the whole pool package. If an older
+public or linked pool exists, stop builds and delete that pool before retrying;
+keep the cache package. Verify private creation on the first run. Disabling
+organization permission inheritance alone does not ensure private creation with
+a public workflow's `GITHUB_TOKEN`.
 
 Helpers must not receive the final cache signing key. Coordination records and
 results are authenticated and bound to the request, revision, run, attempt, and

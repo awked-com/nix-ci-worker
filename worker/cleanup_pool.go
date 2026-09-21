@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-var poolControlTagPattern = regexp.MustCompile(`^nixos-cache-pool-([1-9][0-9]*)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:coordinator-0|(?:assignment|status)-[1-2])$`)
+var poolControlTagPattern = regexp.MustCompile(`^nixos-cache-pool-([1-9][0-9]*)-(?:bootstrap|[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:coordinator-0|(?:assignment|status)-[1-2]))$`)
 
 type poolPackage struct {
-	endpoint, id, name, source string
-	versions                   []Version
+	endpoint, id, name string
+	versions           []Version
 }
 
 func poolPackageSource(value map[string]any) string {
@@ -41,8 +41,7 @@ func planPoolCleanup(api GitHubAPI, storage Storage, repository, versionEndpoint
 	if err != nil {
 		return nil, err
 	}
-	source := strings.TrimPrefix(repository, "ghcr.io/")
-	if item["name"] != packageName || valueID(item["id"]) == "" || poolPackageSource(item) != source || item["package_type"] != "container" {
+	if item["name"] != packageName || valueID(item["id"]) == "" || poolPackageSource(item) != "" || item["package_type"] != "container" {
 		return nil, nil
 	}
 	versions, err := versionInventory(api, endpoint+"/versions")
@@ -72,7 +71,7 @@ func planPoolCleanup(api GitHubAPI, storage Storage, repository, versionEndpoint
 	if !owned {
 		return nil, nil
 	}
-	return &poolPackage{endpoint: endpoint, id: valueID(item["id"]), name: packageName, source: source, versions: versions}, nil
+	return &poolPackage{endpoint: endpoint, id: valueID(item["id"]), name: packageName, versions: versions}, nil
 }
 
 func deletePoolPackage(api GitHubAPI, candidate poolPackage) error {
@@ -84,7 +83,7 @@ func deletePoolPackage(api GitHubAPI, candidate poolPackage) error {
 	if err != nil {
 		return err
 	}
-	if valueID(current["id"]) != candidate.id || current["name"] != candidate.name || current["package_type"] != "container" || poolPackageSource(current) != candidate.source {
+	if valueID(current["id"]) != candidate.id || current["name"] != candidate.name || current["package_type"] != "container" || poolPackageSource(current) != "" {
 		return errors.New("pool package changed during retention")
 	}
 	versions, err := versionInventory(api, candidate.endpoint+"/versions")

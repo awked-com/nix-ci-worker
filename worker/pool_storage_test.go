@@ -69,7 +69,7 @@ func TestPoolControlPackageCanBeRemovedWithoutLosingCache(t *testing.T) {
 			t.Fatal(message, err)
 		}
 		manifest, _, err := storage.GetManifest(bus.controlRepository(), bus.tag(role, runner))
-		if err != nil || manifest.Annotations["org.opencontainers.image.source"] != "https://github.com/test/infra-ci" {
+		if err != nil || manifest.Annotations[poolSourceAnnotation] != "https://github.com/test/infra-ci" || manifest.Annotations["org.opencontainers.image.source"] != "" {
 			t.Fatal(manifest, err)
 		}
 		control, err := LoadSnapshot(storage, bus.controlRepository(), bus.tag(role, runner), bus.identity)
