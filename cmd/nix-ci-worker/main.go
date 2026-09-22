@@ -5,10 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/awked-com/nix-ci-worker/worker"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/awked-com/nix-ci-worker/worker"
 )
 
 func main() {

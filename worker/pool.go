@@ -194,6 +194,8 @@ func (b *poolBus) signingKey(runner int) Secret {
 	return Secret{Data: []byte("infra-ci-transfer-" + name + ":" + base64.StdEncoding.EncodeToString(key))}
 }
 
+// Every helper has one assignment writer and one status writer. A new assignment
+// acknowledges the previous result; publishing or reading a record twice is safe.
 type BuildPool struct {
 	cpus     int
 	timing   poolTiming
@@ -272,8 +274,6 @@ func startBuildPool(bus *poolBus, log io.Writer, timing poolTiming) *BuildPool {
 	return p
 }
 
-// Every helper has one assignment writer and one status writer. A new assignment
-// acknowledges the previous result; publishing or reading a record twice is safe.
 func (p *BuildPool) notify() {
 	select {
 	case p.wake <- struct{}{}:
