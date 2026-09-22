@@ -8,9 +8,9 @@ import (
 )
 
 type indexedPath struct {
-	text   string
-	fields map[string]string
-	refs   []string
+	text    string
+	archive string
+	refs    []string
 }
 
 // An index owns an immutable view. Updates validate changed records and their
@@ -75,7 +75,8 @@ func (i *snapshotIndex) extend(delta *Snapshot) (*Snapshot, error) {
 			return nil, err
 		}
 		path := fields["StorePath"]
-		if _, exists := view.Files["cache/"+fields["URL"]]; !exists || name != NarinfoKey(path) {
+		archive := "cache/" + fields["URL"]
+		if _, exists := view.Files[archive]; !exists || name != NarinfoKey(path) {
 			return nil, errors.New("narinfo references an unreachable archive")
 		}
 		if old := view.Narinfos[name]; old != "" {
@@ -98,7 +99,7 @@ func (i *snapshotIndex) extend(delta *Snapshot) (*Snapshot, error) {
 			return nil, errors.New("conflicting cached and upstream references")
 		}
 		view.Narinfos[name] = text
-		paths[path] = indexedPath{text: text, fields: fields, refs: refs}
+		paths[path] = indexedPath{text: text, archive: archive, refs: refs}
 		changed = append(changed, path)
 	}
 	for _, path := range changed {
@@ -136,8 +137,7 @@ func (i *snapshotIndex) selectPaths(roots map[string]bool) *Snapshot {
 		}
 		if record.text != "" {
 			selected.Narinfos[NarinfoKey(path)] = record.text
-			archive := "cache/" + record.fields["URL"]
-			selected.Files[archive] = i.snapshot.Files[archive]
+			selected.Files[record.archive] = i.snapshot.Files[record.archive]
 		}
 	}
 	return selected
