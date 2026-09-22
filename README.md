@@ -1,15 +1,9 @@
 # Nix CI worker
 
-A Go worker engine for distributed Nix builds on GitHub Actions, with encrypted
-binary caches in GHCR. It plans derivation builds, distributes work between a
-coordinator and helper runners, checkpoints progress, and publishes signed cache
-metadata. The `worker` package also exposes the planner, registry storage, cache
-server, and retention operations for Go callers.
-
-This repository contains the worker engine and its tests. Workflows, fleet
-configuration, SOPS administration, and deployment tooling remain with the
-consuming infrastructure project. The engine currently targets GitHub Actions
-and GHCR; it is not a provider-independent CI service.
+Distributed Nix builds on GitHub Actions, with encrypted binary caches in GHCR.
+The Go worker plans derivation builds, coordinates helper runners, checkpoints
+progress, and publishes signed cache metadata. Consumers own their workflows,
+source checkouts, credentials, and deployment tooling.
 
 ## Build and test
 
@@ -43,8 +37,6 @@ Create a JSON configuration with your GHCR package and cache reference:
 }
 ```
 
-Then run:
-
 ```sh
 ./bin/nix-ci-worker cache --config cache.json --identity /path/to/age-key --port 8080
 ```
@@ -58,8 +50,8 @@ anonymous reads; payloads remain encrypted. SIGINT or SIGTERM stops the server.
 ## Run builds
 
 Without arguments the executable runs the GitHub Actions worker protocol.
-Consumers supply their own workflow, source checkout, Nix installation, and
-credentials. Full builds evaluate `hydraJobs.<system>` in the source flake.
+Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
+source flake.
 Optional host/package selection follows NixOS configuration attributes; see
 [`SelectedTargets`](worker/planner.go). Supported systems and runner labels are
 owned by [`Systems`](worker/planner.go).
@@ -92,18 +84,17 @@ source revision. Retry jobs with those admitted inputs. Finalization expects
 all admitted coordinators and performs retention before publication.
 
 The temporary `<cache-package>-pool` package must be private and unlinked from
-repositories. Supply `CI_POOL_USER` and `CI_POOL_TOKEN` as Actions secrets for all
-worker jobs, using an account allowed to create private organization packages
-(and authorize SSO if required). Pool requests use this credential; cache and
-Actions requests keep using `REGISTRY_TOKEN`. The pool uses a custom source
-annotation to avoid linking it to the public workflow repository. No package
-Actions-access grant is needed because runners authenticate with the pool PAT.
-Admission creates a bootstrap record without runner data and checks privacy
-before coordination. Finalization deletes the whole pool package. If an older
+repositories. Supply `CI_POOL_USER` and `CI_POOL_TOKEN` as Actions secrets to all
+worker jobs. The account must be allowed to create private organization packages,
+with SSO authorization if required. Cache and Actions requests use
+`REGISTRY_TOKEN`; pool requests use the dedicated PAT and need no package
+Actions-access grant. A public workflow's `GITHUB_TOKEN` does not ensure private
+creation, even with organization permission inheritance disabled.
+
+Admission creates a bootstrap record without runner data, then checks pool
+privacy before coordination. Verify private creation on the first run. If a
 public or linked pool exists, stop builds and delete that pool before retrying;
-keep the cache package. Verify private creation on the first run. Disabling
-organization permission inheritance alone does not ensure private creation with
-a public workflow's `GITHUB_TOKEN`.
+keep the cache package. Finalization deletes the pool package.
 
 Helpers must not receive the final cache signing key. Coordination records and
 results are authenticated and bound to the request, revision, run, attempt, and
