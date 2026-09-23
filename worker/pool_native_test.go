@@ -264,7 +264,8 @@ func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 	if err = head.RequireClosed(); err != nil {
 		t.Fatal(err)
 	}
-	if len(storage.manifests) != 1 || len(storage.tags) != 1 {
+	historicalTag := generationTag(system, bus.run, bus.attempt, Int(head.Metadata["publication"]))
+	if len(storage.manifests) != 1 || len(storage.tags) != 2 || storage.tags[historicalTag] != head.Digest || storage.tags[PlatformTag(system)] != head.Digest {
 		t.Fatal("completed helper artifacts survived durable publication", len(storage.manifests), storage.tags)
 	}
 }
