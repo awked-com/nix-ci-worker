@@ -16,10 +16,10 @@ with `nix`, `nix-store`, and `nix-instantiate` on PATH:
 INFRA_NATIVE_NIX_TESTS=1 go test ./worker -run '^TestNative' -count=1
 ```
 
-The native tests create temporary Nix derivations and store paths. The test gate
-keeps its original name for existing test runners. The planner requires Nix's
-version 4 derivation JSON schema (`nix derivation show`), and cache queries use
-`nix path-info --json-format 1`. Use a Nix release supporting both interfaces.
+The native tests create temporary Nix derivations and store paths. The planner
+requires Nix's version 4 derivation JSON schema (`nix derivation show`), and cache
+queries use `nix path-info --json-format 1`. Use a Nix release supporting both
+interfaces.
 
 ## Serve an encrypted cache
 
@@ -54,13 +54,12 @@ see new outputs.
 ## Run builds
 
 Without arguments the executable runs the GitHub Actions worker protocol.
-Consumers provide the workflow, source checkout, credentials, and deployment
-tooling. Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
+Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
 source flake. Select host system derivations and required checks there; their
 transitive dependencies determine which packages need building on each platform.
 Optional host/package selection follows NixOS configuration attributes; see
-[`SelectedTargets`](worker/planner.go). Supported systems and runner labels are
-owned by [`Systems`](worker/planner.go).
+[`SelectedTargets`](worker/planner.go). For supported systems and runner labels,
+see [`Systems`](worker/planner.go).
 
 The workflow supplies these environment variables:
 
@@ -107,9 +106,8 @@ archives are built.
 Coordinators and helpers exchange small encrypted, authenticated messages through
 GitHub Actions cache v2. The workflow must launch the worker from a JavaScript
 action so it inherits GitHub's short-lived runtime credentials; ordinary shell
-steps do not receive them automatically. No pool account, PAT, repository writes,
-or separately provisioned service is needed. Admission does not use the
-coordination service.
+steps do not receive them automatically. Admission does not use the coordination
+service.
 
 Each mailbox update has an immutable, opaque key bound to the request, source
 revision, run, attempt, platform, and runner. Prefix lookup selects the latest
@@ -118,14 +116,10 @@ expire through the existing lease handling, and failed helper work returns to
 the coordinator. GitHub automatically evicts unused entries after seven days.
 Platform caches and encrypted helper build payloads share the main GHCR package.
 
-Helpers must not receive the final cache signing key. Coordination records and
-results are authenticated and bound to the request, revision, run, attempt, and
-platform. Preserve those bindings when embedding the engine. The worker removes
-credential environment variables before executing build subprocesses and keeps
-private failure details out of its top-level error output.
+Helpers must not receive the final cache signing key. The worker removes
+credential environment variables before executing build subprocesses and
+suppresses private failure details in its top-level error output.
 
 ## Use from Go
 
-Import `github.com/awked-com/nix-ci-worker/worker`. Public entry points include
-`Evaluate`, `RunWorker`, `LoadResult`, `NewRegistry`, `NewFileCacheHandler`, and
-`StartCacheServer`. Run `go doc ./worker` for the exported API.
+Import `github.com/awked-com/nix-ci-worker/worker`. Run `go doc ./worker` for the API.
