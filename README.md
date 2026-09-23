@@ -83,16 +83,28 @@ each coordinator loads and updates its platform's cumulative cache head. Outputs
 become available during builds.
 
 The three platform heads retain every previously cached output. Each publication
-retires its superseded head. The coordinator imports and verifies helper outputs,
-signs their cache records, and durably publishes them before retiring the helper's
-input and result manifests. Active helper artifacts add a fixed number of
+writes the same manifest under the existing platform tag and a historical tag:
+`nixos-cache-<system>-run-<run-id>-attempt-<attempt>-publication-<number>`.
+The run ID and attempt identify the workflow execution; the platform identifies
+the coordinator, and the publication number distinguishes updates within its job.
+The historical tag is written first, before moving the platform tag. Each
+publication then retires its superseded head. The coordinator imports and verifies
+helper outputs, signs their cache records, and durably publishes them before
+retiring the helper's input and result manifests. Active helper artifacts add a fixed number of
 temporary versions. Admission cleans up interrupted runs; artifacts from expired
-or ambiguous helper leases wait for that recovery. A cleanup failure stops new
-publication or assignments until a retry succeeds.
+or ambiguous helper leases wait for that recovery.
+
+Versions explicitly protected by GitHub's public-package download limit are kept,
+including their historical tags, without blocking publication or assignments.
+Cleanup continues with other versions and retries retained versions on later runs.
+Other cleanup failures still stop new publication or assignments until a retry
+succeeds. Protected versions and their referenced blobs can accumulate. Older
+versions published before historical tagging may remain untagged.
 
 Cleanup validates ownership and retention metadata and rechecks candidates before
-deletion. Manual tags and unmarked artifacts are outside managed cleanup. Catalog
-pieces are blobs rather than package versions. Retaining every output still
+deletion. Historical generation tags are checked against retention metadata;
+manual tags and unmarked artifacts are outside managed cleanup. Catalog pieces
+are blobs rather than package versions. Retaining every output still
 increases total storage as new unique archives are built.
 
 Coordinators and helpers exchange small encrypted, authenticated messages through

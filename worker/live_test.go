@@ -96,7 +96,7 @@ func TestLivePublicationRetainsHistoricalOutputsAndResults(t *testing.T) {
 		if got := string(cacheRead(t, published, name, identity)); got != "archive "+run {
 			t.Fatal("old reader lost its archive", got)
 		}
-		if len(storage.manifests) != 1 || len(storage.tags) != 1 {
+		if len(storage.manifests) != 1 || len(storage.tags) != 2 {
 			t.Fatal("versions grew with run count", len(storage.manifests), len(storage.tags))
 		}
 	}

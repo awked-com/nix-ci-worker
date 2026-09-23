@@ -2,6 +2,7 @@ package worker
 
 import (
 	"errors"
+	"io"
 	"strconv"
 	"sync"
 )
@@ -15,6 +16,7 @@ type versionRetirer struct {
 	api        GitHubAPI
 	storage    Storage
 	repository string
+	log        io.Writer
 	endpoint   string
 }
 
@@ -71,6 +73,13 @@ func (r *versionRetirer) retire(digests ...string) error {
 		}
 		pinned := false
 		for _, tag := range Tags(version) {
+			generation, err := managedGenerationTag(tag, record)
+			if err != nil {
+				return err
+			}
+			if generation {
+				continue
+			}
 			if record.Kind == "live" || TagRun(tag) != record.Run {
 				pinned = true
 			}
@@ -95,7 +104,7 @@ func (r *versionRetirer) retire(digests ...string) error {
 		if Fingerprint([]Version{current}) != Fingerprint([]Version{candidate}) {
 			return errors.New("retirement candidate changed")
 		}
-		if _, err = r.api(path, "DELETE"); err != nil && !errors.Is(err, ErrObjectNotFound) {
+		if _, err = deleteVersion(r.api, path, r.log); err != nil && !errors.Is(err, ErrObjectNotFound) {
 			return err
 		}
 	}

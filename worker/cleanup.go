@@ -21,15 +21,19 @@ const retentionReaders = 8
 
 // Keep source selections, store paths, commands, and credentials in the catalog.
 type retentionRecord struct {
-	Kind   string `json:"kind"`
-	Run    string `json:"run"`
-	System string `json:"system,omitempty"`
+	Kind        string `json:"kind"`
+	Run         string `json:"run"`
+	System      string `json:"system,omitempty"`
+	Attempt     int    `json:"attempt,omitempty"`
+	Publication int    `json:"publication,omitempty"`
 }
 
 func snapshotRetention(metadata map[string]any) retentionRecord {
 	record := retentionRecord{Kind: String(metadata["kind"]), Run: valueID(metadata["run"])}
 	if record.Kind == "live" {
 		record.System = String(metadata["system"])
+		record.Attempt = Int(metadata["attempt"])
+		record.Publication = Int(metadata["publication"])
 	}
 	return record
 }
@@ -50,7 +54,10 @@ func (r retentionRecord) validate() error {
 		if _, ok := Systems[r.System]; !ok {
 			return errors.New("invalid retention platform")
 		}
-	} else if r.System != "" {
+		if r.Attempt < 0 || r.Publication < 0 || (r.Publication > 0 && r.Attempt == 0) {
+			return errors.New("invalid retention generation")
+		}
+	} else if r.System != "" || r.Attempt != 0 || r.Publication != 0 {
 		return errors.New("unexpected retention platform")
 	}
 	return nil
@@ -58,14 +65,71 @@ func (r retentionRecord) validate() error {
 
 var runTagPattern = regexp.MustCompile(`^nixos-cache-pool-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:inputs-[0-2]|result-[1-2])$`)
 
+var generationTagPattern = regexp.MustCompile(`^nixos-cache-(x86_64-linux|aarch64-linux|aarch64-darwin)-run-([0-9]+)-attempt-([1-9][0-9]*)-publication-([1-9][0-9]*)$`)
+
+// Unknown tags are manual pins. Only a generation tag bound to the manifest's
+// retention metadata is eligible for automated retirement.
+func managedGenerationTag(tag string, record retentionRecord) (bool, error) {
+	if !generationTagPattern.MatchString(tag) {
+		return false, nil
+	}
+	if record.Kind != "live" || record.Publication < 1 || tag != generationTag(record.System, record.Run, record.Attempt, record.Publication) {
+		return false, errors.New("generation tag and retention metadata disagree")
+	}
+	return true, nil
+}
+
+var errDownloadProtected = errors.New("package version protected by download count")
+
+// GitHub has no documented machine-readable code for this restriction. Match
+// an explicit explanation in the JSON message, never a bare permission status.
+var downloadProtectionPattern = regexp.MustCompile(`(?:more than|over) 5,?000 (?:downloads|times)`)
+
+func githubResponseError(method string, status int, body []byte) error {
+	e := &githubStatusError{method: method, status: status}
+	if method == "DELETE" && (status == http.StatusForbidden || status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) {
+		var response struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &response) == nil {
+			message := strings.ToLower(response.Message)
+			e.downloadProtected = strings.Contains(message, "package") && strings.Contains(message, "delet") && strings.Contains(message, "download") && downloadProtectionPattern.MatchString(message)
+		}
+	}
+	return e
+}
+
+// A protected version remains intact and can be retried by later cleanup.
+func deleteVersion(api GitHubAPI, path string, log io.Writer) (bool, error) {
+	_, err := api(path, "DELETE")
+	if errors.Is(err, errDownloadProtected) {
+		if log != nil {
+			fmt.Fprintln(log, "Retention: kept a version protected by GitHub's download limit")
+		}
+		return false, nil
+	}
+	return err == nil, err
+}
+
 type GitHubAPI func(path, method string) (any, error)
 
 type githubStatusError struct {
-	method string
-	status int
+	method            string
+	status            int
+	downloadProtected bool
+}
+
+func (e *githubStatusError) Unwrap() error {
+	if e.downloadProtected {
+		return errDownloadProtected
+	}
+	return nil
 }
 
 func (e *githubStatusError) Error() string {
+	if e.downloadProtected {
+		return fmt.Sprintf("GitHub %s failed (HTTP %d); package version protected by download count", e.method, e.status)
+	}
 	return fmt.Sprintf("GitHub %s failed (HTTP %d); check package admin permissions", e.method, e.status)
 }
 
@@ -108,7 +172,7 @@ func NewGitHub(token string) GitHubAPI {
 		}
 
 		if response.StatusCode != expected {
-			return nil, &githubStatusError{method: method, status: response.StatusCode}
+			return nil, githubResponseError(method, response.StatusCode, body)
 		}
 		if len(body) == 0 {
 			return nil, nil
@@ -489,6 +553,13 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository string, log io.Write
 					return nil, errors.New("platform tag and retention metadata disagree")
 				}
 			}
+			generation, err := managedGenerationTag(tag, record)
+			if err != nil {
+				return nil, err
+			}
+			if generation {
+				continue
+			}
 			tagRun := TagRun(tag)
 			if tagRun == "" {
 				retain = true
@@ -496,7 +567,7 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository string, log io.Write
 				return nil, errors.New("cannot prune pool records: tag and metadata disagree")
 			}
 		}
-		// Untagged platform generations are cumulative and may be retired even
+		// Superseded platform generations are cumulative and may be retired even
 		// while their publisher is active. Other active artifacts can still have
 		// readers holding immutable manifest digests.
 		if record.Kind != "live" {
@@ -558,11 +629,13 @@ func Prune(api GitHubAPI, storage Storage, repository string, log io.Writer) (de
 			return deleted, errors.New("candidate changed during retention")
 		}
 
-		if _, err = api(path, "DELETE"); err != nil {
+		removed, err := deleteVersion(api, path, log)
+		if err != nil {
 			return deleted, err
 		}
-
-		deleted++
+		if removed {
+			deleted++
+		}
 	}
 
 	if log != nil {

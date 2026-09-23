@@ -12,6 +12,11 @@ import (
 // PlatformTag names the cumulative cache owned by one platform coordinator.
 func PlatformTag(system string) string { return "nixos-cache-" + system }
 
+// Live generations remain identifiable if GitHub refuses their deletion.
+func generationTag(system, run string, attempt, publication int) string {
+	return fmt.Sprintf("%s-run-%s-attempt-%d-publication-%d", PlatformTag(system), run, attempt, publication)
+}
+
 var ErrResultBindingMismatch = errors.New("build result binding mismatch")
 
 func loadPlatform(storage Storage, repository, system string, identity Secret) (*Snapshot, error) {
@@ -151,9 +156,21 @@ func (p *livePublisher) update(delta *Snapshot, terminal bool) error {
 	p.snapshot.Metadata = maps.Clone(delta.Metadata)
 	p.snapshot.Metadata["kind"] = "live"
 	p.snapshot.Metadata["system"] = p.system
+	p.snapshot.Metadata["run"] = p.run
+	p.snapshot.Metadata["attempt"] = p.attempt
+	p.snapshot.Metadata["publication"] = p.published + 1
 	previous := p.snapshot.Digest
-	if _, err := p.snapshot.Publish(PlatformTag(p.system), p.recipients); err != nil {
+	if _, err := p.snapshot.Publish(generationTag(p.system, p.run, p.attempt, p.published+1), p.recipients); err != nil {
 		return err
+	}
+	// Both tags must address the same manifest. Publishing the historical tag
+	// first ensures a failed head update leaves an identifiable orphan.
+	digest, err := p.snapshot.Storage.PutManifest(p.snapshot.Repository, PlatformTag(p.system), p.snapshot.Manifest)
+	if err != nil {
+		return err
+	}
+	if digest != p.snapshot.Digest {
+		return errors.New("platform tag manifest digest mismatch")
 	}
 	p.published++
 	if p.log != nil {

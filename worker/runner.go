@@ -750,6 +750,7 @@ func RunWorker(log io.Writer) error {
 
 	api := NewGitHub(token)
 	retirer := newVersionRetirer(api, storage, repository)
+	retirer.log = log
 	workerRecipients, e := IdentityRecipients(identity)
 	if e != nil {
 		return e
