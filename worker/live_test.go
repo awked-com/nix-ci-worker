@@ -128,59 +128,6 @@ func TestLivePublicationStopsAfterRetirementFailure(t *testing.T) {
 	}
 }
 
-func TestLegacyMigrationPreservesFailedResultsAndDisplacedFiles(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	versions := &registryVersions{storage: storage}
-	retirer := newVersionRetirer(versions.api, storage, cacheTestRepository)
-	const system = "aarch64-linux"
-	base := NewSnapshot(storage, cacheTestRepository)
-	base.Metadata = map[string]any{"kind": "commit", "run": "1"}
-	first := cacheRecord(base, "a")
-	if err := cacheAdd(base, evaluationFile(system), strings.NewReader("old plan"), recipients); err != nil {
-		t.Fatal(err)
-	}
-	oldPlan := base.Files[evaluationFile(system)]
-	legacy := publishV2Fixture(t, base, "nixos-cache-latest", recipients)
-	stage := NewSnapshot(storage, cacheTestRepository)
-	stage.Metadata = liveTestMetadata("2", system, 1)
-	stage.Metadata["status"] = "failure"
-	second := cacheRecord(stage, "b", strings.TrimPrefix(first, "/nix/store/"))
-	if err := cacheAdd(stage, evaluationFile(system), strings.NewReader("new plan"), recipients); err != nil {
-		t.Fatal(err)
-	}
-	if err := cacheAdd(stage, "legacy-artifact", strings.NewReader("private result"), recipients); err != nil {
-		t.Fatal(err)
-	}
-	newPlan := stage.Files[evaluationFile(system)]
-	publishV2Fixture(t, stage, ResultTag("2", system, 1), recipients)
-	if err := migrateLegacy(storage, cacheTestRepository, "3", 1, identity, recipients, retirer, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	collectTestBlobs(t, storage)
-	for system := range Systems {
-		current, err := loadPlatform(storage, cacheTestRepository, system, identity)
-		if err != nil || !current.Contains(first) || !current.Contains(second) {
-			t.Fatal("migration lost partial or inherited outputs", err)
-		}
-		for _, file := range []SnapshotFile{oldPlan, newPlan} {
-			if _, exists := storage.objects[file.Blob.Digest]; !exists {
-				t.Fatal("migration lost displaced plan")
-			}
-		}
-	}
-	result, err := LoadResult(storage, cacheTestRepository, "2", system, 1, identity)
-	if err != nil || result.Metadata["status"] != "failure" {
-		t.Fatal("failed run result not migrated", err)
-	}
-	if len(storage.manifests) != len(Systems)+1 || storage.tags["nixos-cache-latest"] != legacy {
-		t.Fatal("legacy intermediate was retained or migration base replaced")
-	}
-	if err := migrateLegacy(storage, cacheTestRepository, "4", 1, identity, recipients, retirer, io.Discard); err != nil || len(storage.manifests) != len(Systems)+1 {
-		t.Fatal("migration was not idempotent", err)
-	}
-}
-
 func TestLoadResultRejectsIdentityBeforeRegistryEffects(t *testing.T) {
 	for _, test := range []struct {
 		run, system string
@@ -206,10 +153,7 @@ func TestEmptyPackageAdmissionThenFirstLivePublication(t *testing.T) {
 	}
 	retirer := newVersionRetirer(api, storage, cacheTestRepository)
 	var log bytes.Buffer
-	if err := migrateLegacy(storage, cacheTestRepository, "1", 1, identity, recipients, retirer, &log); err != nil {
-		t.Fatal("missing package blocked migration", err)
-	}
-	if _, err := Prune(api, storage, cacheTestRepository, "", &log); err != nil {
+	if _, err := Prune(api, storage, cacheTestRepository, &log); err != nil {
 		t.Fatal("missing package blocked admission cleanup", err)
 	}
 	const system = "aarch64-linux"
@@ -232,113 +176,5 @@ func TestEmptyPackageAdmissionThenFirstLivePublication(t *testing.T) {
 	current, err := reader.Current(NarinfoKey(path))
 	if err != nil || !current.Contains(path) || len(storage.manifests) != 1 {
 		t.Fatal("new package did not become a usable cache", err)
-	}
-}
-
-func TestMigrationDiagnosticsDoNotExposeUnderlyingErrors(t *testing.T) {
-	for _, failure := range []error{
-		errors.New("private catalog details"),
-		&githubStatusError{method: "GET", status: 403},
-	} {
-		var log bytes.Buffer
-		retirer := newVersionRetirer(func(string, string) (any, error) { return nil, failure }, nil, cacheTestRepository)
-		err := migrateLegacy(nil, cacheTestRepository, "1", 1, Secret{}, Secret{}, retirer, &log)
-		if !errors.Is(err, failure) || !strings.Contains(log.String(), "listing cache versions") || strings.Contains(log.String(), "private") {
-			t.Fatal("missing phase diagnostic or leaked error", log.String(), err)
-		}
-	}
-}
-
-type interruptedMigrationStorage struct {
-	Storage
-	publish func() error
-}
-
-func (s interruptedMigrationStorage) PutManifest(repository, tag string, manifest Manifest) (string, error) {
-	if err := s.publish(); err != nil {
-		return "", err
-	}
-	return s.Storage.PutManifest(repository, tag, manifest)
-}
-
-func TestLegacyMigrationResumesAfterPartialPublicationAndRetirement(t *testing.T) {
-	for _, interrupted := range []string{"publication", "retirement"} {
-		t.Run(interrupted, func(t *testing.T) {
-			identity, recipients := cacheKeys(t)
-			storage := newMemoryCache()
-			versions := &registryVersions{storage: storage}
-			const system = "aarch64-linux"
-			archives := map[string]string{}
-			for index, char := range "abc" {
-				run := fmt.Sprint(index + 1)
-				seed := NewSnapshot(storage, cacheTestRepository)
-				seed.Metadata = liveTestMetadata(run, system, 1)
-				tag := ResultTag(run, system, 1)
-				if index == 0 {
-					seed.Metadata = map[string]any{"kind": "commit", "run": run}
-					tag = "nixos-cache-latest"
-				}
-				cacheRecord(seed, string(char))
-				name := "cache/nar/" + strings.Repeat(string(char), 64) + ".nar.zst"
-				archives[name] = "retained archive " + run
-				if err := cacheAdd(seed, name, strings.NewReader(archives[name]), recipients); err != nil {
-					t.Fatal(err)
-				}
-				publishV2Fixture(t, seed, tag, recipients)
-			}
-			injected := errors.New("interrupted migration")
-			publications, deletions := 0, 0
-			faulty := interruptedMigrationStorage{Storage: storage, publish: func() error {
-				publications++
-				if interrupted == "publication" && publications == 2 {
-					return injected
-				}
-				return nil
-			}}
-			api := func(path, method string) (any, error) {
-				if method == "DELETE" {
-					deletions++
-					if interrupted == "retirement" && deletions == 2 {
-						return nil, injected
-					}
-				}
-				return versions.api(path, method)
-			}
-			retirer := newVersionRetirer(api, faulty, cacheTestRepository)
-			if err := migrateLegacy(faulty, cacheTestRepository, "4", 1, identity, recipients, retirer, io.Discard); !errors.Is(err, injected) {
-				t.Fatal("migration did not reach interruption", err)
-			}
-			if interrupted == "publication" && len(versions.deleted) != 0 {
-				t.Fatal("legacy versions retired before all platform heads existed")
-			}
-			if interrupted == "retirement" && len(versions.deleted) != 1 {
-				t.Fatal("fixture did not partially retire legacy versions")
-			}
-			// A fresh admission reconstructs its state solely from the registry.
-			retirer = newVersionRetirer(versions.api, storage, cacheTestRepository)
-			if err := migrateLegacy(storage, cacheTestRepository, "5", 1, identity, recipients, retirer, io.Discard); err != nil {
-				t.Fatal("migration retry failed", err)
-			}
-			collectTestBlobs(t, storage)
-			for platform := range Systems {
-				head, err := loadPlatform(storage, cacheTestRepository, platform, identity)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for name, want := range archives {
-					if got := string(cacheRead(t, head, name, identity)); got != want {
-						t.Fatal("migration recovery lost archive", platform, name, got)
-					}
-				}
-			}
-			for _, run := range []string{"2", "3"} {
-				if _, err := LoadResult(storage, cacheTestRepository, run, system, 1, identity); err != nil {
-					t.Fatal("migration recovery lost terminal result", run, err)
-				}
-			}
-			if len(storage.manifests) != len(Systems)+1 {
-				t.Fatal("migration retry retained obsolete versions", len(storage.manifests))
-			}
-		})
 	}
 }

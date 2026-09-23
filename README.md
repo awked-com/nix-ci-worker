@@ -44,12 +44,7 @@ anonymous reads; payloads remain encrypted. SIGINT or SIGTERM stops the server.
 
 Cache readers check small platform indexes and fetch encrypted catalog pieces on
 demand. Build plans and run results are stored separately from the consumer
-catalog. The default `nixos-cache-latest` reference reads every supported platform
-and the existing snapshot during migration. Upgrade readers before enabling the
-new publishers, then verify client substitution. Admission imports existing cache
-and result snapshots into all platform heads; the first migration can take longer
-than later admissions. Old readers keep serving the legacy snapshot but do not
-see new outputs.
+catalog. The default `nixos-cache-latest` reference reads every supported platform.
 
 ## Run builds
 
@@ -85,7 +80,7 @@ The storage owner/package must match `GITHUB_REPOSITORY`. Admission emits the
 coordinator matrix, helper matrix, and resolved source revision. Retry jobs with
 those admitted inputs. The workflow must serialize builds for the cache package;
 each coordinator loads and updates its platform's cumulative cache head. Outputs
-become available during builds, without a separate finalization job.
+become available during builds.
 
 The three platform heads retain every previously cached output. Each publication
 retires its superseded head. The coordinator imports and verifies helper outputs,
@@ -96,12 +91,9 @@ or ambiguous helper leases wait for that recovery. A cleanup failure stops new
 publication or assignments until a retry succeeds.
 
 Cleanup validates ownership and retention metadata and rechecks candidates before
-deletion. Legacy snapshot migration also verifies that platform heads reference
-every payload blob from the snapshots being removed. The legacy aggregate remains
-one additional version during reader rollout. Manual tags and unmarked artifacts
-are outside managed cleanup. Catalog pieces are blobs rather than package
-versions. Retaining every output still increases total storage as new unique
-archives are built.
+deletion. Manual tags and unmarked artifacts are outside managed cleanup. Catalog
+pieces are blobs rather than package versions. Retaining every output still
+increases total storage as new unique archives are built.
 
 Coordinators and helpers exchange small encrypted, authenticated messages through
 GitHub Actions cache v2. The workflow must launch the worker from a JavaScript

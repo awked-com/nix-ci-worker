@@ -61,7 +61,7 @@ func BenchmarkRetentionPlanning(b *testing.B) {
 			delayed := &delayedRetentionStorage{Storage: storage, delay: 2 * time.Millisecond}
 			b.ResetTimer()
 			for b.Loop() {
-				plan, err := PlanCleanup(f.api, delayed, cacheTestRepository, "1", nil)
+				plan, err := PlanCleanup(f.api, delayed, cacheTestRepository, nil)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -73,11 +73,6 @@ func BenchmarkRetentionPlanning(b *testing.B) {
 			b.ReportMetric(float64(delayed.requests.Load())/float64(b.N), "registry-requests/op")
 		})
 	}
-}
-
-func (s *delayedRetentionStorage) ManifestDigest(repository, reference string) (string, error) {
-	_, digest, err := s.GetManifest(repository, reference)
-	return digest, err
 }
 
 func BenchmarkRetentionDeletion(b *testing.B) {
@@ -92,7 +87,7 @@ func BenchmarkRetentionDeletion(b *testing.B) {
 			return f.api(path, method)
 		}
 		b.StartTimer()
-		deleted, err := Prune(api, delayed, cacheTestRepository, "1", nil)
+		deleted, err := Prune(api, delayed, cacheTestRepository, nil)
 		if err != nil || deleted != 100 {
 			b.Fatal(deleted, err)
 		}

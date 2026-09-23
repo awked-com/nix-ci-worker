@@ -120,77 +120,6 @@ func TestCatalogLazyLookupAndCiphertextReuse(t *testing.T) {
 	}
 }
 
-func publishV2Fixture(t *testing.T, snapshot *Snapshot, tag string, recipients Secret) string {
-	t.Helper()
-	data := snapshotCatalog{Format: SnapshotFormat, Version: 2, Files: snapshot.Files, Metadata: snapshot.Metadata, Narinfos: snapshot.Narinfos, Upstream: snapshot.Upstream}
-	descriptor := encryptedCatalogFixture(t, snapshot.Storage, data, recipients)
-	descriptor.Annotations = map[string]string{CatalogTitle: "files"}
-	layers := []Descriptor{descriptor}
-	for _, file := range snapshot.Files {
-		layers = append(layers, file.Blob)
-	}
-	annotations := map[string]string{"org.opencontainers.image.source": "https://github.com/" + strings.TrimPrefix(snapshot.Repository, "ghcr.io/")}
-	retention := snapshotRetention(snapshot.Metadata)
-	if retention.Kind != "" {
-		if err := retention.validate(); err != nil {
-			t.Fatal(err)
-		}
-		raw, err := json.Marshal(retention)
-		if err != nil {
-			t.Fatal(err)
-		}
-		annotations[retentionAnnotation] = string(raw)
-	}
-	config, err := snapshot.Storage.UploadBlob(snapshot.Repository, strings.NewReader("{}"), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest, err := snapshot.Storage.PutManifest(snapshot.Repository, tag, Manifest{SchemaVersion: 2, MediaType: manifestMediaType, Config: config, Layers: layers, Annotations: annotations})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return digest
-}
-
-func TestCatalogLegacyMigrationAndPlatformUnion(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	legacy := catalogFixture(storage, 1)
-	legacy.Metadata["legacy"] = true
-	first := publishV2Fixture(t, legacy, "nixos-cache-latest", recipients)
-	migrated := cacheLoad(t, storage, first, identity)
-	if !reflect.DeepEqual(migrated.Narinfos, legacy.Narinfos) || !reflect.DeepEqual(migrated.Metadata, legacy.Metadata) {
-		t.Fatal("legacy data lost")
-	}
-	systems := sortedKeys(Systems)
-	platform := NewSnapshot(storage, cacheTestRepository)
-	platformName := NarinfoKey(cacheRecord(platform, "a"))
-	cachePublish(t, platform, PlatformTag(systems[0]), recipients)
-	reader := NewSnapshotReader(storage, cacheTestRepository, "", identity, nil)
-	legacyName := sortedKeys(legacy.Narinfos)[0]
-	for _, name := range []string{legacyName, platformName} {
-		current, err := reader.Current(name)
-		if err != nil || !current.HasFile(name) {
-			t.Fatalf("migration union missing %s: %v", name, err)
-		}
-	}
-	for _, system := range systems {
-		cachePublish(t, migrated, PlatformTag(system), recipients)
-	}
-	measured := &measuredCatalogStorage{Storage: storage, reads: map[string]int{}}
-	reader = NewSnapshotReader(measured, cacheTestRepository, "", identity, nil)
-	current, err := reader.Current(legacyName)
-	if err != nil || !current.HasFile(legacyName) {
-		t.Fatal(err)
-	}
-	if len(reader.views) != len(Systems) || reader.views["nixos-cache-latest"] != nil {
-		t.Fatal("complete migration still downloads legacy catalog")
-	}
-	if measured.manifests != len(Systems) {
-		t.Fatalf("unexpected manifest reads %d", measured.manifests)
-	}
-}
-
 func TestCatalogConcurrentLookupsPreserveImmutableViews(t *testing.T) {
 	identity, recipients := cacheKeys(t)
 	storage := newMemoryCache()
@@ -647,5 +576,27 @@ func TestCatalogConsumerAndWriterNodeBounds(t *testing.T) {
 	}
 	if len(storage.objects) != before {
 		t.Fatal("invalid writer tree uploaded partial data")
+	}
+}
+
+func TestCatalogPlatformUnion(t *testing.T) {
+	identity, recipients := cacheKeys(t)
+	storage := newMemoryCache()
+	names := []string{}
+	for i, system := range sortedKeys(Systems) {
+		platform := NewSnapshot(storage, cacheTestRepository)
+		names = append(names, NarinfoKey(cacheRecord(platform, string(rune('a'+i)))))
+		cachePublish(t, platform, PlatformTag(system), recipients)
+	}
+	measured := &measuredCatalogStorage{Storage: storage, reads: map[string]int{}}
+	reader := NewSnapshotReader(measured, cacheTestRepository, "", identity, nil)
+	for _, name := range names {
+		current, err := reader.Current(name)
+		if err != nil || !current.HasFile(name) {
+			t.Fatalf("platform union missing %s: %v", name, err)
+		}
+	}
+	if len(reader.views) != len(Systems) || measured.manifests != len(Systems) {
+		t.Fatalf("unexpected platform reads: %d views, %d manifests", len(reader.views), measured.manifests)
 	}
 }

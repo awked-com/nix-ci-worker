@@ -112,7 +112,7 @@ func JobLogicalName(name string) string {
 			return system
 		}
 	}
-	if name == "admit" || name == "finalize" {
+	if name == "admit" {
 		return name
 	}
 	return ""

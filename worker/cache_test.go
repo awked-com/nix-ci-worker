@@ -217,8 +217,8 @@ func TestSnapshotEncryptedCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cachePublish(t, snapshot, "nixos-cache-latest", recipients)
-	loaded := cacheLoad(t, storage, "nixos-cache-latest", identity)
+	cachePublish(t, snapshot, PlatformTag("aarch64-linux"), recipients)
+	loaded := cacheLoad(t, storage, PlatformTag("aarch64-linux"), identity)
 	if !reflect.DeepEqual(loaded.Narinfos, snapshot.Narinfos) || !reflect.DeepEqual(loaded.Metadata, snapshot.Metadata) {
 		t.Fatal("snapshot content changed")
 	}
@@ -399,7 +399,7 @@ func TestSnapshotReaderRefreshPinningAndRecovery(t *testing.T) {
 	snapshot := NewSnapshot(storage, cacheTestRepository)
 	path := cacheRecord(snapshot, "a")
 	name := NarinfoKey(path)
-	first := cachePublish(t, snapshot, "nixos-cache-latest", recipients)
+	first := cachePublish(t, snapshot, PlatformTag("aarch64-linux"), recipients)
 	reader := NewSnapshotReader(storage, cacheTestRepository, "", identity, nil)
 	now := time.Unix(1000, 0)
 
@@ -416,7 +416,7 @@ func TestSnapshotReaderRefreshPinningAndRecovery(t *testing.T) {
 	}
 
 	snapshot.Metadata["change"] = true
-	second := cachePublish(t, snapshot, "nixos-cache-latest", recipients)
+	second := cachePublish(t, snapshot, PlatformTag("aarch64-linux"), recipients)
 	cached, err := reader.Current(name)
 	if err != nil || cached.Digest != first {
 		t.Fatal("refreshed too early", err)
@@ -451,11 +451,11 @@ func TestCacheHandlerHonorsPinnedReference(t *testing.T) {
 	storage := newMemoryCache()
 	first := NewSnapshot(storage, cacheTestRepository)
 	firstPath := cacheRecord(first, "a")
-	firstDigest := cachePublish(t, first, "nixos-cache-latest", recipients)
+	firstDigest := cachePublish(t, first, PlatformTag("aarch64-linux"), recipients)
 
 	latest := NewSnapshot(storage, cacheTestRepository)
 	latestPath := cacheRecord(latest, "b")
-	cachePublish(t, latest, "nixos-cache-latest", recipients)
+	cachePublish(t, latest, PlatformTag("aarch64-linux"), recipients)
 
 	handler := NewCacheHandler(storage, cacheTestRepository, firstDigest, identity, nil)
 	server := httptest.NewServer(handler)
@@ -504,7 +504,7 @@ func TestFileCacheHandlerReloadsIdentity(t *testing.T) {
 	if err := cacheAdd(oldSnapshot, oldName, bytes.NewReader(oldPayload), oldRecipients); err != nil {
 		t.Fatal(err)
 	}
-	cachePublish(t, oldSnapshot, "nixos-cache-latest", oldRecipients)
+	cachePublish(t, oldSnapshot, PlatformTag("aarch64-linux"), oldRecipients)
 
 	handler := NewFileCacheHandler(storage, cacheTestRepository, "", identityPath, nil)
 	now := time.Unix(1000, 0)
@@ -541,7 +541,7 @@ func TestFileCacheHandlerReloadsIdentity(t *testing.T) {
 	newSnapshot.Narinfos[narinfoName] = narinfo
 	// Catalogs can contain both entries; cached narinfo takes precedence.
 	newSnapshot.Files[narinfoName] = newSnapshot.Files[newName]
-	cachePublish(t, newSnapshot, "nixos-cache-latest", newRecipients)
+	cachePublish(t, newSnapshot, PlatformTag("aarch64-linux"), newRecipients)
 	combined := append(append([]byte{}, oldIdentity.Data...), newIdentity.Data...)
 	replaceIdentity(combined)
 	now = now.Add(31 * time.Second)
@@ -591,7 +591,7 @@ func TestSlowRefreshServesExistingPaths(t *testing.T) {
 	storage := newMemoryCache()
 	snapshot := NewSnapshot(storage, cacheTestRepository)
 	name := NarinfoKey(cacheRecord(snapshot, "a"))
-	cachePublish(t, snapshot, "nixos-cache-latest", recipients)
+	cachePublish(t, snapshot, PlatformTag("aarch64-linux"), recipients)
 	reader := NewSnapshotReader(storage, cacheTestRepository, "", identity, nil)
 	original, err := reader.Current(name)
 	if err != nil {

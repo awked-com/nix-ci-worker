@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"path/filepath"
 	"regexp"
@@ -18,10 +17,6 @@ const (
 	CatalogLimit   = 256 * 1024 * 1024
 	SnapshotFormat = "infra-ci-snapshot"
 )
-
-func ResultTag(run, system string, attempt int) string {
-	return fmt.Sprintf("nixos-cache-result-%s-%d-%s", run, attempt, system)
-}
 
 func DecryptBlob(storage Storage, repository string, descriptor Descriptor, identity Secret) (io.ReadCloser, error) {
 	source, err := storage.Blob(repository, descriptor)
@@ -161,15 +156,6 @@ func (f SnapshotFile) validate() error {
 		return errors.New("whole file digest differs from blob digest")
 	}
 	return nil
-}
-
-type snapshotCatalog struct {
-	Format   string                  `json:"format"`
-	Version  int                     `json:"version"`
-	Files    map[string]SnapshotFile `json:"files"`
-	Metadata map[string]any          `json:"metadata"`
-	Narinfos map[string]string       `json:"narinfos"`
-	Upstream map[string][]string     `json:"upstream"`
 }
 
 func LoadSnapshot(storage Storage, repository, reference string, identity Secret) (*Snapshot, error) {

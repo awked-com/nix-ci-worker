@@ -155,48 +155,8 @@ func TestRollingRetirementBoundsSuccessfulTaskVersions(t *testing.T) {
 	}
 }
 
-func TestLegacyRetirementRequiresDurablePayloadMigration(t *testing.T) {
-	_, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	versions := &registryVersions{storage: storage}
-	r := newVersionRetirer(versions.api, storage, cacheTestRepository)
-	legacy := NewSnapshot(storage, cacheTestRepository)
-	legacy.Metadata = map[string]any{"kind": "stage", "run": "1"}
-	if err := cacheAdd(legacy, "cache/results/old.json", strings.NewReader("historical payload"), recipients); err != nil {
-		t.Fatal(err)
-	}
-	digest := publishV2Fixture(t, legacy, "nixos-cache-result-1-1-x86_64-linux", recipients)
-	seeds, err := r.legacySeeds()
-	if err != nil || !slices.Equal(seeds, []string{digest}) {
-		t.Fatal(seeds, err)
-	}
-	if err := r.retireLegacy(digest); err == nil || len(versions.deleted) != 0 {
-		t.Fatal("retired before creating platform heads", err)
-	}
-	for system := range Systems {
-		live := NewSnapshot(storage, cacheTestRepository)
-		live.Metadata = map[string]any{"kind": "live", "run": "2", "system": system}
-		cachePublish(t, live, PlatformTag(system), recipients)
-	}
-	if err := r.retireLegacy(digest); err == nil || len(versions.deleted) != 0 {
-		t.Fatal("retired payload before durable migration", err)
-	}
-	live := NewSnapshot(storage, cacheTestRepository)
-	if err = live.Merge(legacy); err != nil {
-		t.Fatal(err)
-	}
-	live.Metadata = map[string]any{"kind": "live", "run": "2", "system": "x86_64-linux"}
-	cachePublish(t, live, PlatformTag("x86_64-linux"), recipients)
-	if err = r.retireLegacy(digest); err != nil || !slices.Equal(versions.deleted, []string{digest}) {
-		t.Fatal("failed migrated retirement", versions.deleted, err)
-	}
-	if err = r.retireLegacy(digest); err != nil {
-		t.Fatal("retirement retry was not idempotent", err)
-	}
-}
-
 func TestRecoveryRetainsActiveHelpersAndOnlyCurrentPlatformHeads(t *testing.T) {
-	f := newRetentionFixture()
+	f := &retentionFixture{manifests: map[string]Manifest{}}
 	f.active = []map[string]any{{"id": "2"}}
 	for i, system := range sortedKeys(Systems) {
 		f.add(int64(10+i*2), []string{}, map[string]any{"kind": "live", "run": "2", "system": system})
@@ -236,30 +196,5 @@ func TestRollingRetirementRetriesPartialDeletion(t *testing.T) {
 	}
 	if err := r.retire(digests...); err != nil || len(storage.manifests) != 0 {
 		t.Fatal("partial retirement retry failed", err, len(storage.manifests))
-	}
-}
-
-func TestLegacyRetirementProtectsPinnedCheckpointParents(t *testing.T) {
-	_, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	versions := &registryVersions{storage: storage}
-	r := newVersionRetirer(versions.api, storage, cacheTestRepository)
-	base := NewSnapshot(storage, cacheTestRepository)
-	base.Metadata = map[string]any{"kind": "commit", "run": "1"}
-	parent := publishV2Fixture(t, base, "nixos-cache-run-1-1", recipients)
-	checkpoint := NewSnapshot(storage, cacheTestRepository)
-	checkpoint.Metadata = map[string]any{"kind": "stage", "run": "2", "parent": parent}
-	pinned := publishV2Fixture(t, checkpoint, "manual-checkpoint", recipients)
-	for system := range Systems {
-		live := NewSnapshot(storage, cacheTestRepository)
-		live.Metadata = map[string]any{"kind": "live", "run": "3", "system": system}
-		cachePublish(t, live, PlatformTag(system), recipients)
-	}
-	// The pinned child can be outside the explicitly requested deletion set.
-	if err := r.retireLegacy(parent); err != nil || len(versions.deleted) != 0 {
-		t.Fatal("manual checkpoint parent was retired", err, versions.deleted)
-	}
-	if _, _, err := storage.GetManifest(cacheTestRepository, pinned); err != nil {
-		t.Fatal(err)
 	}
 }

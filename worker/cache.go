@@ -94,18 +94,13 @@ func (r *SnapshotReader) references() []string {
 	if r.reference != "nixos-cache-latest" {
 		return []string{r.reference}
 	}
-	return append(platformTags(), "nixos-cache-latest")
+	return platformTags()
 }
 
 func (r *SnapshotReader) refresh() {
 	var failures []error
 	references := r.references()
-	platformsReady := true
 	for _, reference := range references {
-		if reference == "nixos-cache-latest" && len(references) > 1 && platformsReady {
-			delete(r.views, reference)
-			break
-		}
 		prior := r.views[reference]
 		var digest string
 		var manifest Manifest
@@ -135,7 +130,6 @@ func (r *SnapshotReader) refresh() {
 			}
 		}
 		if err != nil {
-			platformsReady = false
 			if !errors.Is(err, ErrObjectNotFound) || prior != nil || len(references) == 1 {
 				failures = append(failures, err)
 			}
@@ -153,11 +147,6 @@ func (r *SnapshotReader) refresh() {
 				continue
 			}
 			digests = append(digests, view.digest)
-			if view.legacy != nil {
-				if err := mergeConsumerRecords(next, view.legacy); err != nil {
-					failures = append(failures, err)
-				}
-			}
 		}
 		if len(digests) == 1 {
 			next.Digest = digests[0]

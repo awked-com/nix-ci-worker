@@ -48,7 +48,6 @@ type catalogView struct {
 	digest     string
 	root       catalogRoot
 	reachable  map[string]Descriptor
-	legacy     *Snapshot
 	nodes      map[string]catalogNode
 	prefixes   map[string]string
 	blobs      map[string]Descriptor
@@ -320,62 +319,28 @@ func openCatalog(storage Storage, repository string, manifest Manifest, digest s
 	if root == nil {
 		return nil, errors.New("missing files catalog")
 	}
-	limit := CatalogLimit
-	if root.MediaType == catalogRootMediaType {
-		limit = catalogRootLimit
+	if root.MediaType != catalogRootMediaType {
+		return nil, errors.New("unsupported catalog media type")
 	}
-	raw, err := readCatalogBlob(storage, repository, *root, identity, limit)
+	raw, err := readCatalogBlob(storage, repository, *root, identity, catalogRootLimit)
 	if err != nil {
 		return nil, err
 	}
-	var version struct {
-		Format  string `json:"format"`
-		Version int    `json:"version"`
-	}
-	if err = json.Unmarshal(raw, &version); err != nil {
+	if err = json.Unmarshal(raw, &view.root); err != nil {
 		return nil, err
 	}
-	if version.Format != SnapshotFormat {
+	if view.root.Format != SnapshotFormat || view.root.Version != 3 {
 		return nil, errors.New("unsupported catalog format")
 	}
-	switch version.Version {
-	case 2:
-		var catalog snapshotCatalog
-		if err = json.Unmarshal(raw, &catalog); err != nil {
-			return nil, err
-		}
-		if catalog.Files == nil || catalog.Narinfos == nil || catalog.Metadata == nil || catalog.Upstream == nil {
-			return nil, errors.New("incomplete files catalog")
-		}
-		snapshot := NewSnapshot(storage, repository)
-		snapshot.Manifest, snapshot.Digest = manifest, digest
-		snapshot.Files, snapshot.Narinfos, snapshot.Metadata, snapshot.Upstream = catalog.Files, catalog.Narinfos, catalog.Metadata, catalog.Upstream
-		if err = view.validateFiles(snapshot.Files); err != nil {
-			return nil, err
-		}
-		if err = snapshot.ValidateRecords(); err != nil {
-			return nil, err
-		}
-		view.legacy = snapshot
-	case 3:
-		if len(raw) > catalogRootLimit {
-			return nil, errors.New("catalog root exceeds limit")
-		}
-		if err = json.Unmarshal(raw, &view.root); err != nil {
-			return nil, err
-		}
-		if !digestPattern.MatchString(view.root.Recipients) {
-			return nil, errors.New("invalid catalog recipient fingerprint")
-		}
-		for _, descriptor := range []Descriptor{view.root.Index, view.root.Writer, view.root.Metadata} {
-			if err = view.reachableBlob(descriptor); err != nil {
-				return nil, err
-			}
-		}
-		view.blobs[contentDigest(raw)] = *root
-	default:
-		return nil, errors.New("unsupported catalog format")
+	if !digestPattern.MatchString(view.root.Recipients) {
+		return nil, errors.New("invalid catalog recipient fingerprint")
 	}
+	for _, descriptor := range []Descriptor{view.root.Index, view.root.Writer, view.root.Metadata} {
+		if err = view.reachableBlob(descriptor); err != nil {
+			return nil, err
+		}
+	}
+	view.blobs[contentDigest(raw)] = *root
 	return view, nil
 }
 
@@ -521,9 +486,6 @@ func addCatalogRecords(snapshot *Snapshot, records map[string]catalogRecord) err
 }
 
 func (v *catalogView) lookup(name string, identity Secret) (*Snapshot, error) {
-	if v.legacy != nil {
-		return v.legacy, nil
-	}
 	snapshot := NewSnapshot(v.storage, v.repository)
 	descriptor, prefix := v.root.Index, ""
 	hash := strings.TrimPrefix(contentDigest([]byte(name)), "sha256:")
@@ -548,9 +510,6 @@ func (v *catalogView) lookup(name string, identity Secret) (*Snapshot, error) {
 }
 
 func (v *catalogView) loadAll(identity Secret) (*Snapshot, error) {
-	if v.legacy != nil {
-		return v.legacy, nil
-	}
 	snapshot := NewSnapshot(v.storage, v.repository)
 	snapshot.Manifest, snapshot.Digest = v.manifest, v.digest
 	type branch struct {

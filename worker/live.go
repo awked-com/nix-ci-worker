@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"strings"
-	"time"
 )
 
 // PlatformTag names the cumulative cache owned by one platform coordinator.
@@ -22,35 +20,12 @@ func loadPlatform(storage Storage, repository, system string, identity Secret) (
 	}
 	snapshot, err := LoadSnapshot(storage, repository, PlatformTag(system), identity)
 	if errors.Is(err, ErrObjectNotFound) {
-		// The old aggregate remains the migration base until each platform has
-		// published a cumulative head containing all of its inherited outputs.
-		snapshot, err = LoadSnapshot(storage, repository, "nixos-cache-latest", identity)
-		if errors.Is(err, ErrObjectNotFound) {
-			return NewSnapshot(storage, repository), nil
-		}
+		return NewSnapshot(storage, repository), nil
 	}
 	if err == nil {
 		err = snapshot.RequireClosed()
 	}
 	return snapshot, err
-}
-
-// LoadParent reads the cumulative union, including an existing pre-migration cache.
-func LoadParent(storage Storage, repository string, identity Secret) (*Snapshot, error) {
-	result := NewSnapshot(storage, repository)
-	for _, reference := range append([]string{"nixos-cache-latest"}, platformTags()...) {
-		snapshot, err := LoadSnapshot(storage, repository, reference, identity)
-		if errors.Is(err, ErrObjectNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err = result.Merge(snapshot); err != nil {
-			return nil, err
-		}
-	}
-	return result, result.RequireClosed()
 }
 
 func platformTags() []string {
@@ -72,40 +47,32 @@ func resultFile(run, system string, attempt int) (string, error) {
 }
 
 // LoadResult reads an encrypted run result without retaining a manifest per run.
-// Existing result tags remain readable during the catalog migration.
 func LoadResult(storage Storage, repository, run, system string, attempt int, identity Secret) (*Snapshot, error) {
 	name, err := resultFile(run, system, attempt)
 	if err != nil {
 		return nil, err
 	}
 	snapshot, err := LoadSnapshot(storage, repository, PlatformTag(system), identity)
-	if err == nil && snapshot.HasFile(name) {
-		reader, err := snapshot.Read(name, identity)
-		if err != nil {
-			return nil, err
-		}
-		defer reader.Close()
-		raw, err := readLimited(reader, CatalogLimit)
-		if err != nil {
-			return nil, err
-		}
-		result := NewSnapshot(storage, repository)
-		if err = json.Unmarshal(raw, &result.Metadata); err != nil {
-			return nil, err
-		}
-		if err = validateResult(result.Metadata, run, system, attempt); err != nil {
-			return nil, err
-		}
-		return result, nil
-	}
-	if err != nil && !errors.Is(err, ErrObjectNotFound) {
+	if err != nil {
 		return nil, err
 	}
-	snapshot, err = LoadSnapshot(storage, repository, ResultTag(run, system, attempt), identity)
-	if err == nil {
-		err = validateResult(snapshot.Metadata, run, system, attempt)
+	reader, err := snapshot.Read(name, identity)
+	if err != nil {
+		return nil, err
 	}
-	return snapshot, err
+	defer reader.Close()
+	raw, err := readLimited(reader, CatalogLimit)
+	if err != nil {
+		return nil, err
+	}
+	result := NewSnapshot(storage, repository)
+	if err = json.Unmarshal(raw, &result.Metadata); err != nil {
+		return nil, err
+	}
+	if err = validateResult(result.Metadata, run, system, attempt); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func validateResult(metadata map[string]any, run, system string, attempt int) error {
@@ -141,100 +108,6 @@ func storeResult(snapshot *Snapshot, metadata map[string]any, recipients Secret)
 	}
 	snapshot.Files[name] = wholeFile(blob)
 	return nil
-}
-
-func migrateLegacy(storage Storage, repository, run string, attempt int, identity, recipients Secret, retirer *versionRetirer, log io.Writer) (err error) {
-	started, phase := time.Now(), "listing cache versions"
-	defer func() {
-		if err == nil || log == nil {
-			return
-		}
-		fmt.Fprintf(log, "Cache migration failed while %s", phase)
-		var apiError *githubStatusError
-		var uploadError *UploadError
-		if errors.As(err, &apiError) {
-			fmt.Fprintf(log, " (GitHub HTTP %d)", apiError.status)
-		} else if errors.As(err, &uploadError) {
-			fmt.Fprintf(log, " (GHCR HTTP %d)", uploadError.Status)
-		}
-		fmt.Fprintln(log)
-	}()
-	if log != nil {
-		fmt.Fprintln(log, "Cache migration: checking existing versions")
-	}
-	seeds, err := retirer.legacySeeds()
-	if err != nil || len(seeds) == 0 {
-		if err == nil && log != nil {
-			fmt.Fprintln(log, "Cache migration: no legacy snapshots")
-		}
-		return err
-	}
-	phase = "checking platform heads"
-	missing := []string{}
-	for _, system := range sortedKeys(Systems) {
-		if _, err := storage.ManifestDigest(repository, PlatformTag(system)); errors.Is(err, ErrObjectNotFound) {
-			missing = append(missing, system)
-		} else if err != nil {
-			return err
-		}
-	}
-	if len(missing) == 0 {
-		// Also finishes cleanup if a previous admission stopped after publishing
-		// its final head. Retirement independently checks blob reachability.
-		phase = "retiring legacy versions"
-		return retirer.retireLegacy(seeds...)
-	}
-	base := NewSnapshot(storage, repository)
-	phase = "reading legacy snapshots"
-	for index, digest := range seeds {
-		if log != nil {
-			fmt.Fprintf(log, "Cache migration: reading snapshot %d/%d\n", index+1, len(seeds))
-		}
-		seed, err := LoadSnapshot(storage, repository, digest, identity)
-		if err != nil {
-			return err
-		}
-		for name, file := range base.Files {
-			if next, ok := seed.Files[name]; ok && strings.HasPrefix(name, "cache/plan/") && next.Blob.Digest != file.Blob.Digest {
-				base.Files["cache/retained/"+file.Blob.Digest] = file
-			}
-		}
-		if err = base.Merge(seed); err != nil {
-			return err
-		}
-		// Preserve non-cache artifacts too: an old version can only disappear
-		// after every one of its payload blobs has another durable reference.
-		for name, file := range seed.Files {
-			if existing, ok := base.Files[name]; ok && existing.Blob.Digest != file.Blob.Digest {
-				base.Files["cache/retained/"+file.Blob.Digest] = file
-				continue
-			}
-			base.Files[name] = file
-		}
-		if seed.Metadata["kind"] == "stage" && seed.Metadata["terminal"] == true {
-			if err = storeResult(base, seed.Metadata, recipients); err != nil {
-				return err
-			}
-		}
-	}
-	if err := base.RequireClosed(); err != nil {
-		return err
-	}
-	for _, system := range missing {
-		phase = "publishing platform heads"
-		if log != nil {
-			fmt.Fprintf(log, "Cache migration: publishing %s\n", system)
-		}
-		base.Metadata = map[string]any{"kind": "live", "system": system, "run": run, "attempt": attempt}
-		if _, err := base.Publish(PlatformTag(system), recipients); err != nil {
-			return err
-		}
-	}
-	if log != nil {
-		fmt.Fprintf(log, "Cache migration: initialized %d platform heads (%.1fs)\n", len(missing), time.Since(started).Seconds())
-	}
-	phase = "retiring legacy versions"
-	return retirer.retireLegacy(seeds...)
 }
 
 type livePublisher struct {
@@ -278,7 +151,6 @@ func (p *livePublisher) update(delta *Snapshot, terminal bool) error {
 	p.snapshot.Metadata = maps.Clone(delta.Metadata)
 	p.snapshot.Metadata["kind"] = "live"
 	p.snapshot.Metadata["system"] = p.system
-	delete(p.snapshot.Metadata, "parent")
 	previous := p.snapshot.Digest
 	if _, err := p.snapshot.Publish(PlatformTag(p.system), p.recipients); err != nil {
 		return err

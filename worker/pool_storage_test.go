@@ -43,11 +43,11 @@ func (s *memoryCoordination) Read(prefix, previous string) (string, []byte, erro
 func TestCoordinationEvictionKeepsPublishedCache(t *testing.T) {
 	bus := poolFixture(t)
 	cache := NewSnapshot(bus.storage, bus.repository)
-	cache.Metadata = map[string]any{"kind": "commit", "run": bus.run}
+	cache.Metadata = map[string]any{"kind": "live", "run": bus.run, "system": bus.system}
 	if err := cacheAdd(cache, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", strings.NewReader("cache archive"), bus.recipients); err != nil {
 		t.Fatal(err)
 	}
-	digest := cachePublish(t, cache, "nixos-cache-latest", bus.recipients)
+	digest := cachePublish(t, cache, PlatformTag(bus.system), bus.recipients)
 	for _, role := range []string{"coordinator", "assignment", "status"} {
 		runner := 1
 		if role == "coordinator" {

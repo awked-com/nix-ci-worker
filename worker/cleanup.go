@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,20 +19,15 @@ import (
 const retentionAnnotation = "com.awked.infra-ci.retention.v1"
 const retentionReaders = 8
 
-// These fields are already public run IDs or opaque registry digests. Keep
-// source selections, store paths, commands, and credentials in the catalog.
+// Keep source selections, store paths, commands, and credentials in the catalog.
 type retentionRecord struct {
 	Kind   string `json:"kind"`
 	Run    string `json:"run"`
-	Parent string `json:"parent,omitempty"`
 	System string `json:"system,omitempty"`
 }
 
 func snapshotRetention(metadata map[string]any) retentionRecord {
 	record := retentionRecord{Kind: String(metadata["kind"]), Run: valueID(metadata["run"])}
-	if record.Kind == "stage" {
-		record.Parent = String(metadata["parent"])
-	}
 	if record.Kind == "live" {
 		record.System = String(metadata["system"])
 	}
@@ -46,14 +40,11 @@ func validRetentionRun(id string) bool {
 }
 
 func (r retentionRecord) validate() error {
-	if r.Kind != "commit" && r.Kind != "stage" && r.Kind != "pool" && r.Kind != "control" && r.Kind != "live" {
+	if r.Kind != "pool" && r.Kind != "live" {
 		return errors.New("invalid retention artifact kind")
 	}
 	if !validRetentionRun(r.Run) {
 		return errors.New("missing or invalid retention run ID")
-	}
-	if r.Parent != "" && (r.Kind != "stage" || !digestPattern.MatchString(r.Parent)) {
-		return errors.New("invalid retention parent digest")
 	}
 	if r.Kind == "live" {
 		if _, ok := Systems[r.System]; !ok {
@@ -65,7 +56,7 @@ func (r retentionRecord) validate() error {
 	return nil
 }
 
-var runTagPattern = regexp.MustCompile(`^(?:nixos-cache-run-([0-9]+)-[1-9][0-9]*|nixos-cache-stage-([0-9]+)-[1-9][0-9]*-[1-4]-[a-f0-9]{32}|nixos-cache-result-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)|nixos-cache-pool-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:inputs-[0-2]|result-[1-2]))$`)
+var runTagPattern = regexp.MustCompile(`^nixos-cache-pool-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:inputs-[0-2]|result-[1-2])$`)
 
 type GitHubAPI func(path, method string) (any, error)
 
@@ -375,22 +366,7 @@ func TagRun(tag string) string {
 		return ""
 	}
 
-	for _, part := range match[1:] {
-		if part != "" {
-			return part
-		}
-	}
-
-	return ""
-}
-
-func latestDigest(storage Storage, repository string) (string, error) {
-	digest, err := storage.ManifestDigest(repository, "nixos-cache-latest")
-	if errors.Is(err, ErrObjectNotFound) {
-		return "", nil
-	}
-
-	return digest, err
+	return match[1]
 }
 
 type inspectedVersion struct {
@@ -454,14 +430,11 @@ func inspectVersions(storage Storage, repository string, versions []Version, log
 }
 
 type retentionPlan struct {
-	endpoint, latest string
-	versions         []Version
+	endpoint string
+	versions []Version
 }
 
-func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string, log io.Writer) (*retentionPlan, error) {
-	if completedRun != "" && !validRetentionRun(completedRun) {
-		return nil, errors.New("cannot prune artifacts: invalid completed run ID")
-	}
+func PlanCleanup(api GitHubAPI, storage Storage, repository string, log io.Writer) (*retentionPlan, error) {
 	endpoint, versions, err := Inventory(api, repository)
 	if err != nil {
 		return nil, err
@@ -470,21 +443,13 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string
 		return &retentionPlan{endpoint: endpoint}, nil
 	}
 
-	byDigest := map[string]Version{}
+	byDigest := map[string]bool{}
 	for _, version := range versions {
-		byDigest[version.Name] = version
+		byDigest[version.Name] = true
 	}
 
 	if len(byDigest) != len(versions) {
 		return nil, errors.New("duplicate version digests")
-	}
-
-	latest, err := latestDigest(storage, repository)
-	if err != nil {
-		return nil, err
-	}
-	if latest != "" && !slices.Contains(Tags(byDigest[latest]), "nixos-cache-latest") {
-		return nil, errors.New("package inventory does not match latest")
 	}
 
 	repo := strings.TrimPrefix(repository, "ghcr.io/")
@@ -503,31 +468,21 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string
 			activeRuns[id] = true
 		}
 	}
-	if completedRun != "" {
-		delete(activeRuns, completedRun)
-	}
 
 	inspected, err := inspectVersions(storage, repository, versions, log)
 	if err != nil {
 		return nil, err
 	}
 
-	protected := map[string]bool{}
-	parents := map[string]string{}
-	roots := []string{}
+	candidates := []Version{}
 	for i, version := range versions {
 		if !inspected[i].owned {
-			protected[version.Name] = true
 			continue
 		}
 		record := inspected[i].record
-		parents[version.Name] = record.Parent
 		run := record.Run
 		pool := record.Kind == "pool"
-		// Legacy snapshots are migration inputs, including outputs from failed
-		// runs. Only the explicit migration path may retire them after all
-		// platform heads durably retain their payloads.
-		retain := version.Name == latest || record.Kind == "commit" || record.Kind == "stage"
+		retain := false
 		for _, tag := range Tags(version) {
 			for system := range Systems {
 				if tag == PlatformTag(system) && (record.Kind != "live" || record.System != system) {
@@ -535,15 +490,10 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string
 				}
 			}
 			tagRun := TagRun(tag)
-			if tag != "nixos-cache-latest" && tagRun == "" {
+			if tagRun == "" {
 				retain = true
-			}
-			if strings.HasPrefix(tag, "nixos-cache-pool-") && tagRun != "" {
-				if !pool || tagRun != run {
-					return nil, errors.New("cannot prune pool records: tag and metadata disagree")
-				}
-			} else if activeRuns[tagRun] {
-				retain = true
+			} else if !pool || tagRun != run {
+				return nil, errors.New("cannot prune pool records: tag and metadata disagree")
 			}
 		}
 		// Untagged platform generations are cumulative and may be retired even
@@ -552,34 +502,7 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string
 		if record.Kind != "live" {
 			retain = retain || activeRuns[run]
 		}
-		if retain {
-			protected[version.Name] = true
-			roots = append(roots, version.Name)
-		}
-	}
-
-	// Untagged retained checkpoints need the same parent protection as tagged
-	// ones: assignments and recovery can refer to immutable digests directly.
-	visited := map[string]bool{}
-	for len(roots) > 0 {
-		digest := roots[len(roots)-1]
-		roots = roots[:len(roots)-1]
-		if visited[digest] {
-			continue
-		}
-		visited[digest] = true
-		if parent := parents[digest]; parent != "" {
-			if _, ok := byDigest[parent]; !ok {
-				return nil, errors.New("retained checkpoint parent is missing")
-			}
-			protected[parent] = true
-			roots = append(roots, parent)
-		}
-	}
-
-	candidates := []Version{}
-	for _, version := range versions {
-		if !protected[version.Name] {
+		if !retain {
 			candidates = append(candidates, version)
 		}
 	}
@@ -591,10 +514,10 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string
 
 		return candidates[i].UpdatedAt < candidates[j].UpdatedAt
 	})
-	return &retentionPlan{endpoint: endpoint, latest: latest, versions: candidates}, nil
+	return &retentionPlan{endpoint: endpoint, versions: candidates}, nil
 }
 
-func Prune(api GitHubAPI, storage Storage, repository, completedRun string, log io.Writer) (deleted int, err error) {
+func Prune(api GitHubAPI, storage Storage, repository string, log io.Writer) (deleted int, err error) {
 	started := time.Now()
 	phase := "planning cleanup"
 	defer func() {
@@ -610,7 +533,7 @@ func Prune(api GitHubAPI, storage Storage, repository, completedRun string, log 
 		}
 		fmt.Fprintln(log)
 	}()
-	plan, err := PlanCleanup(api, storage, repository, completedRun, log)
+	plan, err := PlanCleanup(api, storage, repository, log)
 	if err != nil {
 		return 0, err
 	}
@@ -621,24 +544,8 @@ func Prune(api GitHubAPI, storage Storage, repository, completedRun string, log 
 
 	phase = "deleting cache versions"
 	for _, candidate := range plan.versions {
-		// Overlap independent read checks, but keep deletes serial and wait for
-		// both checks before each mutation. No later candidate is prefetched.
-		var currentLatest string
-		var latestError error
-		checked := make(chan struct{})
-		go func() {
-			defer close(checked)
-			currentLatest, latestError = latestDigest(storage, repository)
-		}()
 		path := plan.endpoint + "/" + strconv.FormatInt(candidate.ID, 10)
 		value, err := api(path, "GET")
-		<-checked
-		if latestError != nil {
-			return deleted, latestError
-		}
-		if currentLatest != plan.latest {
-			return deleted, errors.New("latest cache changed during retention")
-		}
 		if err != nil {
 			return deleted, err
 		}

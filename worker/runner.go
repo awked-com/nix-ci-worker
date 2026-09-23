@@ -820,10 +820,7 @@ func RunWorker(log io.Writer) error {
 		if e != nil || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(strings.TrimSpace(string(revision))) {
 			return errors.New("resolve admitted source commit")
 		}
-		if e = migrateLegacy(storage, repository, run, attempt, identity, recipients, retirer, log); e != nil {
-			return e
-		}
-		if _, e = Prune(api, storage, repository, "", log); e != nil {
+		if _, e = Prune(api, storage, repository, log); e != nil {
 			return e
 		}
 
