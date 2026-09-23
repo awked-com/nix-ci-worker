@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"strings"
+	"time"
 )
 
 // PlatformTag names the cumulative cache owned by one platform coordinator.
@@ -142,11 +143,33 @@ func storeResult(snapshot *Snapshot, metadata map[string]any, recipients Secret)
 	return nil
 }
 
-func migrateLegacy(storage Storage, repository, run string, attempt int, identity, recipients Secret, retirer *versionRetirer, log io.Writer) error {
+func migrateLegacy(storage Storage, repository, run string, attempt int, identity, recipients Secret, retirer *versionRetirer, log io.Writer) (err error) {
+	started, phase := time.Now(), "listing cache versions"
+	defer func() {
+		if err == nil || log == nil {
+			return
+		}
+		fmt.Fprintf(log, "Cache migration failed while %s", phase)
+		var apiError *githubStatusError
+		var uploadError *UploadError
+		if errors.As(err, &apiError) {
+			fmt.Fprintf(log, " (GitHub HTTP %d)", apiError.status)
+		} else if errors.As(err, &uploadError) {
+			fmt.Fprintf(log, " (GHCR HTTP %d)", uploadError.Status)
+		}
+		fmt.Fprintln(log)
+	}()
+	if log != nil {
+		fmt.Fprintln(log, "Cache migration: checking existing versions")
+	}
 	seeds, err := retirer.legacySeeds()
 	if err != nil || len(seeds) == 0 {
+		if err == nil && log != nil {
+			fmt.Fprintln(log, "Cache migration: no legacy snapshots")
+		}
 		return err
 	}
+	phase = "checking platform heads"
 	missing := []string{}
 	for _, system := range sortedKeys(Systems) {
 		if _, err := storage.ManifestDigest(repository, PlatformTag(system)); errors.Is(err, ErrObjectNotFound) {
@@ -158,10 +181,15 @@ func migrateLegacy(storage Storage, repository, run string, attempt int, identit
 	if len(missing) == 0 {
 		// Also finishes cleanup if a previous admission stopped after publishing
 		// its final head. Retirement independently checks blob reachability.
+		phase = "retiring legacy versions"
 		return retirer.retireLegacy(seeds...)
 	}
 	base := NewSnapshot(storage, repository)
-	for _, digest := range seeds {
+	phase = "reading legacy snapshots"
+	for index, digest := range seeds {
+		if log != nil {
+			fmt.Fprintf(log, "Cache migration: reading snapshot %d/%d\n", index+1, len(seeds))
+		}
 		seed, err := LoadSnapshot(storage, repository, digest, identity)
 		if err != nil {
 			return err
@@ -193,14 +221,19 @@ func migrateLegacy(storage Storage, repository, run string, attempt int, identit
 		return err
 	}
 	for _, system := range missing {
+		phase = "publishing platform heads"
+		if log != nil {
+			fmt.Fprintf(log, "Cache migration: publishing %s\n", system)
+		}
 		base.Metadata = map[string]any{"kind": "live", "system": system, "run": run, "attempt": attempt}
 		if _, err := base.Publish(PlatformTag(system), recipients); err != nil {
 			return err
 		}
 	}
 	if log != nil {
-		fmt.Fprintf(log, "Cache migration: initialized %d platform heads\n", len(missing))
+		fmt.Fprintf(log, "Cache migration: initialized %d platform heads (%.1fs)\n", len(missing), time.Since(started).Seconds())
 	}
+	phase = "retiring legacy versions"
 	return retirer.retireLegacy(seeds...)
 }
 

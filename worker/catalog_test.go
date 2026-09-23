@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -246,7 +248,7 @@ func TestCatalogWriterShardsReuseUnchangedCoverage(t *testing.T) {
 	identity, recipients := cacheKeys(t)
 	storage := newMemoryCache()
 	snapshot := catalogFixture(storage, 1)
-	for i := range 8000 {
+	for i := range 20000 {
 		path := "/nix/store/" + strings.ReplaceAll(fmt.Sprintf("%032x", i), "e", "g") + "-upstream"
 		snapshot.Upstream[path] = []string{}
 	}
@@ -459,5 +461,191 @@ func TestCatalogUnionChecksRecordsBeforeMerging(t *testing.T) {
 				t.Fatal("duplicate records replaced usable ciphertext")
 			}
 		})
+	}
+}
+
+// Requests stay blocked until the test observes the full worker pool. This
+// proves network operations overlap without relying on elapsed-time thresholds.
+type blockedCatalogStorage struct {
+	Storage
+	uploads bool
+	blobs   map[string]bool
+	entered chan struct{}
+	release chan struct{}
+	failure error
+	active  atomic.Int32
+	maximum atomic.Int32
+}
+
+func (s *blockedCatalogStorage) block() error {
+	active := s.active.Add(1)
+	defer s.active.Add(-1)
+	for maximum := s.maximum.Load(); active > maximum; maximum = s.maximum.Load() {
+		if s.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return s.failure
+}
+
+func (s *blockedCatalogStorage) UploadBlob(repository string, source io.Reader, encrypted bool) (Descriptor, error) {
+	if s.uploads {
+		if err := s.block(); err != nil {
+			return Descriptor{}, err
+		}
+	}
+	return s.Storage.UploadBlob(repository, source, encrypted)
+}
+
+func (s *blockedCatalogStorage) Blob(repository string, descriptor Descriptor) (io.ReadCloser, error) {
+	if s.blobs[descriptor.Digest] {
+		if err := s.block(); err != nil {
+			return nil, err
+		}
+	}
+	return s.Storage.Blob(repository, descriptor)
+}
+
+func waitCatalogRequests(t *testing.T, storage *blockedCatalogStorage) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for range catalogConcurrency {
+		select {
+		case <-storage.entered:
+		case <-deadline.C:
+			t.Fatal("catalog requests did not run concurrently")
+		}
+	}
+	if got := storage.maximum.Load(); got != catalogConcurrency {
+		t.Fatalf("concurrent requests = %d, want %d", got, catalogConcurrency)
+	}
+}
+
+func TestCatalogBoundedParallelPublicationAndFailure(t *testing.T) {
+	_, recipients := cacheKeys(t)
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			memory := newMemoryCache()
+			storage := &blockedCatalogStorage{Storage: memory, uploads: true, entered: make(chan struct{}, catalogConcurrency), release: make(chan struct{})}
+			if fail {
+				storage.failure = errors.New("failed catalog upload")
+			}
+			defer func() {
+				if storage.release != nil {
+					close(storage.release)
+				}
+			}()
+			snapshot := catalogFixture(storage, 3000)
+			result := make(chan error, 1)
+			go func() { _, err := snapshot.Publish("catalog", recipients); result <- err }()
+			waitCatalogRequests(t, storage)
+			close(storage.release)
+			if err := <-result; !errors.Is(err, storage.failure) {
+				t.Fatalf("publication error = %v, want %v", err, storage.failure)
+			}
+			storage.release = nil
+			if storage.maximum.Load() > catalogConcurrency || storage.active.Load() != 0 {
+				t.Fatal("catalog publication exceeded its concurrency bound or left requests running")
+			}
+			if fail && (snapshot.Digest != "" || len(memory.manifests) != 0) {
+				t.Fatal("failed catalog upload published a partial manifest")
+			}
+		})
+	}
+}
+
+func TestCatalogBoundedParallelLoadAndFailure(t *testing.T) {
+	identity, recipients := cacheKeys(t)
+	memory := newMemoryCache()
+	snapshot := catalogFixture(memory, 3000)
+	cachePublish(t, snapshot, "catalog", recipients)
+	view, err := openCatalog(memory, cacheTestRepository, snapshot.Manifest, snapshot.Digest, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := map[string]bool{}
+	for _, descriptor := range snapshot.Manifest.Layers {
+		if descriptor.Annotations[CatalogTitle] != "files" && descriptor.Digest != view.root.Index.Digest && descriptor.Digest != view.root.Writer.Digest && descriptor.Digest != view.root.Metadata.Digest {
+			blobs[descriptor.Digest] = true
+		}
+	}
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			storage := &blockedCatalogStorage{Storage: memory, blobs: blobs, entered: make(chan struct{}, catalogConcurrency), release: make(chan struct{})}
+			if fail {
+				storage.failure = errors.New("failed catalog download")
+			}
+			defer func() {
+				if storage.release != nil {
+					close(storage.release)
+				}
+			}()
+			result := make(chan error, 1)
+			go func() {
+				loaded, err := LoadSnapshot(storage, cacheTestRepository, "catalog", identity)
+				if err == nil && (!reflect.DeepEqual(snapshot.Files, loaded.Files) || !reflect.DeepEqual(snapshot.Narinfos, loaded.Narinfos)) {
+					err = errors.New("parallel catalog load lost records")
+				}
+				if err != nil && loaded != nil {
+					err = errors.New("failed load returned a partial snapshot")
+				}
+				result <- err
+			}()
+			waitCatalogRequests(t, storage)
+			close(storage.release)
+			if err := <-result; !errors.Is(err, storage.failure) {
+				t.Fatalf("load error = %v, want %v", err, storage.failure)
+			}
+			storage.release = nil
+			if storage.maximum.Load() > catalogConcurrency || storage.active.Load() != 0 {
+				t.Fatal("catalog load exceeded its concurrency bound or left requests running")
+			}
+		})
+	}
+}
+
+func TestCatalogConsumerAndWriterNodeBounds(t *testing.T) {
+	identity, recipients := cacheKeys(t)
+	storage := newMemoryCache()
+	// One large record fits a writer node, while the consumer bound is kept
+	// small independently of the larger writer-only coverage shards.
+	snapshot := NewSnapshot(storage, cacheTestRepository)
+	path := "/nix/store/" + strings.Repeat("0", 32) + "-coverage"
+	snapshot.Upstream[path] = make([]string, 3000)
+	for i := range snapshot.Upstream[path] {
+		snapshot.Upstream[path][i] = path
+	}
+	cachePublish(t, snapshot, "catalog", recipients)
+	loaded := cacheLoad(t, storage, "catalog", identity)
+	if !reflect.DeepEqual(loaded.Upstream, snapshot.Upstream) {
+		t.Fatal("larger writer node lost coverage")
+	}
+	view, err := openCatalog(storage, cacheTestRepository, snapshot.Manifest, snapshot.Digest, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := readCatalogBlob(storage, cacheTestRepository, view.root.Writer, identity, catalogWriterNodeLimit)
+	if err != nil || len(raw) <= catalogNodeLimit {
+		t.Fatalf("writer node size=%d error=%v", len(raw), err)
+	}
+	if _, err = readCatalogBlob(storage, cacheTestRepository, view.root.Writer, identity, catalogNodeLimit); err == nil {
+		t.Fatal("consumer size bound was relaxed")
+	}
+	snapshot.Upstream[path] = make([]string, catalogWriterNodeLimit/len(path)+1)
+	for i := range snapshot.Upstream[path] {
+		snapshot.Upstream[path][i] = path
+	}
+	before := len(storage.objects)
+	if _, err = snapshot.Publish("oversized", recipients); err == nil {
+		t.Fatal("oversized writer record accepted")
+	}
+	if len(storage.objects) != before {
+		t.Fatal("invalid writer tree uploaded partial data")
 	}
 }

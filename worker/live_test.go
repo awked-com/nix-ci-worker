@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -189,6 +190,61 @@ func TestLoadResultRejectsIdentityBeforeRegistryEffects(t *testing.T) {
 	} {
 		if _, err := LoadResult(nil, cacheTestRepository, test.run, test.system, test.attempt, Secret{}); err == nil {
 			t.Fatal("accepted invalid result identity")
+		}
+	}
+}
+
+func TestEmptyPackageAdmissionThenFirstLivePublication(t *testing.T) {
+	identity, recipients := cacheKeys(t)
+	storage := newMemoryCache()
+	versions := &registryVersions{storage: storage}
+	api := func(path, method string) (any, error) {
+		if strings.Contains(path, "/versions?") && len(storage.manifests) == 0 {
+			return nil, ErrObjectNotFound
+		}
+		return versions.api(path, method)
+	}
+	retirer := newVersionRetirer(api, storage, cacheTestRepository)
+	var log bytes.Buffer
+	if err := migrateLegacy(storage, cacheTestRepository, "1", 1, identity, recipients, retirer, &log); err != nil {
+		t.Fatal("missing package blocked migration", err)
+	}
+	if _, err := Prune(api, storage, cacheTestRepository, "", &log); err != nil {
+		t.Fatal("missing package blocked admission cleanup", err)
+	}
+	const system = "aarch64-linux"
+	base, err := loadPlatform(storage, cacheTestRepository, system, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta := NewSnapshot(storage, cacheTestRepository)
+	delta.Metadata = liveTestMetadata("1", system, 1)
+	path := cacheRecord(delta, "a")
+	publisher := &livePublisher{snapshot: base, system: system, run: "1", attempt: 1, recipients: recipients, retire: retirer.retire}
+	if err := publisher.publish(delta, false); err != nil {
+		t.Fatal("first cache publication failed", err)
+	}
+	if err := publisher.publish(delta, true); err != nil {
+		t.Fatal("new package could not retire its first generation", err)
+	}
+	collectTestBlobs(t, storage)
+	reader := NewSnapshotReader(storage, cacheTestRepository, "", identity, io.Discard)
+	current, err := reader.Current(NarinfoKey(path))
+	if err != nil || !current.Contains(path) || len(storage.manifests) != 1 {
+		t.Fatal("new package did not become a usable cache", err)
+	}
+}
+
+func TestMigrationDiagnosticsDoNotExposeUnderlyingErrors(t *testing.T) {
+	for _, failure := range []error{
+		errors.New("private catalog details"),
+		&githubStatusError{method: "GET", status: 403},
+	} {
+		var log bytes.Buffer
+		retirer := newVersionRetirer(func(string, string) (any, error) { return nil, failure }, nil, cacheTestRepository)
+		err := migrateLegacy(nil, cacheTestRepository, "1", 1, Secret{}, Secret{}, retirer, &log)
+		if !errors.Is(err, failure) || !strings.Contains(log.String(), "listing cache versions") || strings.Contains(log.String(), "private") {
+			t.Fatal("missing phase diagnostic or leaked error", log.String(), err)
 		}
 	}
 }

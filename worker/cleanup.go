@@ -298,7 +298,17 @@ func decodeVersion(value any) (Version, error) {
 }
 
 func versionInventory(api GitHubAPI, endpoint string) ([]Version, error) {
-	values, err := Pages(api, endpoint, "")
+	first := true
+	values, err := Pages(func(path, method string) (any, error) {
+		value, err := api(path, method)
+		// A new or deleted package has no versions yet. A disappearance after
+		// pagination starts must still abort instead of accepting a partial list.
+		if first && errors.Is(err, ErrObjectNotFound) {
+			value, err = []map[string]any{}, nil
+		}
+		first = false
+		return value, err
+	}, endpoint, "")
 	if err != nil {
 		return nil, err
 	}
@@ -449,9 +459,15 @@ type retentionPlan struct {
 }
 
 func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string, log io.Writer) (*retentionPlan, error) {
+	if completedRun != "" && !validRetentionRun(completedRun) {
+		return nil, errors.New("cannot prune artifacts: invalid completed run ID")
+	}
 	endpoint, versions, err := Inventory(api, repository)
 	if err != nil {
 		return nil, err
+	}
+	if len(versions) == 0 {
+		return &retentionPlan{endpoint: endpoint}, nil
 	}
 
 	byDigest := map[string]Version{}
@@ -473,9 +489,6 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string
 
 	repo := strings.TrimPrefix(repository, "ghcr.io/")
 	workflow := "repos/" + repo + "/actions/workflows/build.yml/runs"
-	if completedRun != "" && !validRetentionRun(completedRun) {
-		return nil, errors.New("cannot prune artifacts: invalid completed run ID")
-	}
 	activeRuns := map[string]bool{}
 	for _, state := range activeStates {
 		active, err := Pages(api, workflow+"?status="+state, "workflow_runs")

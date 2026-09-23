@@ -7,11 +7,15 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // Nodes are split by the SHA-256 of the cache key. The tree keeps both the
 // discovery root and individual lookups bounded as the cumulative cache grows.
 const catalogNodeLimit = 128 * 1024
+const catalogWriterNodeLimit = 1024 * 1024
+const catalogConcurrency = 8
 const catalogRootLimit = 16 * 1024
 const catalogRootMediaType = "application/vnd.awked.nix-ci.catalog.v3+age"
 
@@ -37,6 +41,7 @@ type catalogNode struct {
 }
 
 type catalogView struct {
+	mu         sync.Mutex
 	storage    Storage
 	repository string
 	manifest   Manifest
@@ -80,6 +85,8 @@ func (s *Snapshot) publishCatalog(recipients Secret, layers map[string]Descripto
 	}
 	s.catalogRecipients = recipientHash
 	reused := map[string]Descriptor{}
+	var mu sync.Mutex
+	uploads := map[string]func() (Descriptor, error){}
 	upload := func(data any, limit int) (Descriptor, error) {
 		raw, err := json.Marshal(data)
 		if err != nil {
@@ -89,30 +96,38 @@ func (s *Snapshot) publishCatalog(recipients Secret, layers map[string]Descripto
 			return Descriptor{}, errors.New("catalog exceeds limit")
 		}
 		hash := contentDigest(raw)
-		descriptor, ok := reused[hash]
-		if !ok {
-			descriptor, ok = s.catalogBlobs[hash]
+		mu.Lock()
+		send, exists := uploads[hash]
+		if !exists {
+			send = sync.OnceValues(func() (Descriptor, error) {
+				if descriptor, ok := s.catalogBlobs[hash]; ok {
+					return descriptor, nil
+				}
+				var compressed bytes.Buffer
+				writer, _ := gzip.NewWriterLevel(&compressed, 3)
+				if _, err := writer.Write(raw); err != nil {
+					return Descriptor{}, err
+				}
+				if err := writer.Close(); err != nil {
+					return Descriptor{}, err
+				}
+				stream, err := EncryptedStream(&compressed, recipients)
+				if err != nil {
+					return Descriptor{}, err
+				}
+				defer stream.Close()
+				return s.Storage.UploadBlob(s.Repository, stream, true)
+			})
+			uploads[hash] = send
 		}
-		if !ok {
-			var compressed bytes.Buffer
-			writer, _ := gzip.NewWriterLevel(&compressed, 3)
-			if _, err = writer.Write(raw); err != nil {
-				return Descriptor{}, err
-			}
-			if err = writer.Close(); err != nil {
-				return Descriptor{}, err
-			}
-			stream, err := EncryptedStream(&compressed, recipients)
-			if err != nil {
-				return Descriptor{}, err
-			}
-			descriptor, err = s.Storage.UploadBlob(s.Repository, stream, true)
-			stream.Close()
-			if err != nil {
-				return Descriptor{}, err
-			}
+		mu.Unlock()
+		descriptor, err := send()
+		if err != nil {
+			return Descriptor{}, err
 		}
+		mu.Lock()
 		reused[hash], layers[descriptor.Digest] = descriptor, descriptor
+		mu.Unlock()
 		return descriptor, nil
 	}
 	records := map[string]catalogRecord{}
@@ -140,11 +155,11 @@ func (s *Snapshot) publishCatalog(recipients Secret, layers map[string]Descripto
 		writer[path] = record
 	}
 	// Validate and partition both trees before uploading any new catalog blobs.
-	consumerPlan, err := partitionCatalog(records, 0)
+	consumerPlan, err := partitionCatalog(records, 0, catalogNodeLimit)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	writerPlan, err := partitionCatalog(writer, 0)
+	writerPlan, err := partitionCatalog(writer, 0, catalogWriterNodeLimit)
 	if err != nil {
 		return Descriptor{}, err
 	}
@@ -155,34 +170,44 @@ func (s *Snapshot) publishCatalog(recipients Secret, layers map[string]Descripto
 	if len(metadata) > CatalogLimit {
 		return Descriptor{}, errors.New("catalog exceeds limit")
 	}
-	var publishTree func(*catalogPartition) (Descriptor, error)
-	publishTree = func(plan *catalogPartition) (Descriptor, error) {
-		node := catalogNode{Records: plan.records}
-		if plan.children != nil {
-			node.Children = map[string]Descriptor{}
-			for _, nibble := range sortedKeys(plan.children) {
-				descriptor, err := publishTree(plan.children[nibble])
-				if err != nil {
-					return Descriptor{}, err
-				}
-				node.Children[nibble] = descriptor
-			}
+	levels := [][]*catalogPartition{}
+	var visit func(*catalogPartition, int)
+	visit = func(plan *catalogPartition, depth int) {
+		if depth == len(levels) {
+			levels = append(levels, nil)
 		}
-		return upload(node, catalogNodeLimit)
+		levels[depth] = append(levels[depth], plan)
+		for _, nibble := range sortedKeys(plan.children) {
+			visit(plan.children[nibble], depth+1)
+		}
 	}
-	index, err := publishTree(consumerPlan)
-	if err != nil {
-		return Descriptor{}, err
-	}
-	state, err := publishTree(writerPlan)
-	if err != nil {
-		return Descriptor{}, err
+	visit(consumerPlan, 0)
+	visit(writerPlan, 0)
+	// Publish each tree level together so parents only reference completed
+	// uploads, without serializing independent leaf requests to the registry.
+	for depth := len(levels) - 1; depth >= 0; depth-- {
+		level := levels[depth]
+		if err := parallelCatalog(len(level), func(i int) error {
+			plan := level[i]
+			node := catalogNode{Records: plan.records}
+			if plan.children != nil {
+				node.Children = map[string]Descriptor{}
+				for nibble, child := range plan.children {
+					node.Children[nibble] = child.descriptor
+				}
+			}
+			var err error
+			plan.descriptor, err = upload(node, plan.limit)
+			return err
+		}); err != nil {
+			return Descriptor{}, err
+		}
 	}
 	meta, err := upload(json.RawMessage(metadata), CatalogLimit)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	root, err := upload(catalogRoot{Format: SnapshotFormat, Version: 3, Index: index, Writer: state, Metadata: meta, Recipients: recipientHash}, catalogRootLimit)
+	root, err := upload(catalogRoot{Format: SnapshotFormat, Version: 3, Index: consumerPlan.descriptor, Writer: writerPlan.descriptor, Metadata: meta, Recipients: recipientHash}, catalogRootLimit)
 	if err == nil {
 		s.catalogBlobs = reused
 	}
@@ -191,17 +216,19 @@ func (s *Snapshot) publishCatalog(recipients Secret, layers map[string]Descripto
 }
 
 type catalogPartition struct {
-	records  map[string]catalogRecord
-	children map[string]*catalogPartition
+	descriptor Descriptor
+	limit      int
+	records    map[string]catalogRecord
+	children   map[string]*catalogPartition
 }
 
-func partitionCatalog(records map[string]catalogRecord, depth int) (*catalogPartition, error) {
+func partitionCatalog(records map[string]catalogRecord, depth, limit int) (*catalogPartition, error) {
 	raw, err := json.Marshal(catalogNode{Records: records})
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) <= catalogNodeLimit {
-		return &catalogPartition{records: records}, nil
+	if len(raw) <= limit {
+		return &catalogPartition{records: records, limit: limit}, nil
 	}
 	if len(records) == 1 || depth == 64 {
 		return nil, errors.New("cache record exceeds catalog node limit")
@@ -214,15 +241,40 @@ func partitionCatalog(records map[string]catalogRecord, depth int) (*catalogPart
 		}
 		groups[nibble][name] = record
 	}
-	plan := &catalogPartition{children: map[string]*catalogPartition{}}
+	plan := &catalogPartition{limit: limit, children: map[string]*catalogPartition{}}
 	for _, nibble := range sortedKeys(groups) {
-		child, err := partitionCatalog(groups[nibble], depth+1)
+		child, err := partitionCatalog(groups[nibble], depth+1, limit)
 		if err != nil {
 			return nil, err
 		}
 		plan.children[nibble] = child
 	}
 	return plan, nil
+}
+
+func parallelCatalog(count int, work func(int) error) error {
+	var next atomic.Int64
+	var failed atomic.Bool
+	var firstError error
+	var workers sync.WaitGroup
+	for range min(catalogConcurrency, count) {
+		workers.Go(func() {
+			for !failed.Load() {
+				i := int(next.Add(1) - 1)
+				if i >= count {
+					return
+				}
+				if err := work(i); err != nil {
+					if failed.CompareAndSwap(false, true) {
+						firstError = err
+					}
+					return
+				}
+			}
+		})
+	}
+	workers.Wait()
+	return firstError
 }
 
 func readCatalogBlob(storage Storage, repository string, descriptor Descriptor, identity Secret, limit int) ([]byte, error) {
@@ -351,19 +403,27 @@ func (v *catalogView) node(descriptor Descriptor, prefix string, consumer bool, 
 	if err := v.reachableBlob(descriptor); err != nil {
 		return catalogNode{}, err
 	}
-	if prior, exists := v.prefixes[descriptor.Digest]; exists && prior != prefix {
+	v.mu.Lock()
+	prior, seen := v.prefixes[descriptor.Digest]
+	node, exists := v.nodes[descriptor.Digest]
+	v.mu.Unlock()
+	if seen && prior != prefix {
 		return catalogNode{}, errors.New("catalog node reused at a different prefix")
 	}
-	node, exists := v.nodes[descriptor.Digest]
+	hash := ""
 	if !exists {
-		raw, err := readCatalogBlob(v.storage, v.repository, descriptor, identity, catalogNodeLimit)
+		limit := catalogNodeLimit
+		if !consumer {
+			limit = catalogWriterNodeLimit
+		}
+		raw, err := readCatalogBlob(v.storage, v.repository, descriptor, identity, limit)
 		if err != nil {
 			return catalogNode{}, err
 		}
 		if err = json.Unmarshal(raw, &node); err != nil {
 			return catalogNode{}, err
 		}
-		v.blobs[contentDigest(raw)] = descriptor
+		hash = contentDigest(raw)
 	}
 	if len(prefix) > 64 || (node.Records == nil && len(node.Children) == 0) || (node.Records != nil && node.Children != nil) {
 		return catalogNode{}, errors.New("invalid catalog tree")
@@ -419,8 +479,16 @@ func (v *catalogView) node(descriptor Descriptor, prefix string, consumer bool, 
 			return catalogNode{}, errors.New("archive without narinfo")
 		}
 	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if prior, exists := v.prefixes[descriptor.Digest]; exists && prior != prefix {
+		return catalogNode{}, errors.New("catalog node reused at a different prefix")
+	}
 	v.nodes[descriptor.Digest] = node
 	v.prefixes[descriptor.Digest] = prefix
+	if hash != "" {
+		v.blobs[hash] = descriptor
+	}
 	return node, nil
 }
 
@@ -485,27 +553,31 @@ func (v *catalogView) loadAll(identity Secret) (*Snapshot, error) {
 	}
 	snapshot := NewSnapshot(v.storage, v.repository)
 	snapshot.Manifest, snapshot.Digest = v.manifest, v.digest
-	var walk func(Descriptor, string, bool) error
-	walk = func(descriptor Descriptor, prefix string, consumer bool) error {
-		node, err := v.node(descriptor, prefix, consumer, identity)
-		if err != nil {
+	type branch struct {
+		descriptor Descriptor
+		prefix     string
+		consumer   bool
+	}
+	level := []branch{{descriptor: v.root.Index, consumer: true}, {descriptor: v.root.Writer}}
+	for len(level) != 0 {
+		nodes := make([]catalogNode, len(level))
+		if err := parallelCatalog(len(level), func(i int) error {
+			var err error
+			nodes[i], err = v.node(level[i].descriptor, level[i].prefix, level[i].consumer, identity)
 			return err
+		}); err != nil {
+			return nil, err
 		}
-		if err = addCatalogRecords(snapshot, node.Records); err != nil {
-			return err
-		}
-		for _, nibble := range sortedKeys(node.Children) {
-			if err = walk(node.Children[nibble], prefix+nibble, consumer); err != nil {
-				return err
+		next := []branch{}
+		for i, node := range nodes {
+			if err := addCatalogRecords(snapshot, node.Records); err != nil {
+				return nil, err
+			}
+			for _, nibble := range sortedKeys(node.Children) {
+				next = append(next, branch{node.Children[nibble], level[i].prefix + nibble, level[i].consumer})
 			}
 		}
-		return nil
-	}
-	if err := walk(v.root.Index, "", true); err != nil {
-		return nil, err
-	}
-	if err := walk(v.root.Writer, "", false); err != nil {
-		return nil, err
+		level = next
 	}
 	raw, err := readCatalogBlob(v.storage, v.repository, v.root.Metadata, identity, CatalogLimit)
 	if err != nil {

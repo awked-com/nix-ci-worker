@@ -2,6 +2,7 @@ package worker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -255,6 +256,63 @@ func TestRetentionInventoryPagination(t *testing.T) {
 	_, versions, err := Inventory(f.api, cacheTestRepository)
 	if err != nil || len(versions) != 13102 {
 		t.Fatal(len(versions), err)
+	}
+}
+
+func TestVersionInventoryHandlesAbsentPackagesWithoutHidingErrors(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{"missing", ErrObjectNotFound},
+		{"forbidden", &githubStatusError{method: "GET", status: 403}},
+		{"transport", errors.New("transport failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			versions, err := versionInventory(func(string, string) (any, error) { return nil, test.err }, "versions")
+			if test.name == "missing" {
+				if err != nil || len(versions) != 0 {
+					t.Fatal("absent package did not produce an empty inventory", versions, err)
+				}
+			} else if !errors.Is(err, test.err) {
+				t.Fatal("inventory failure was suppressed", err)
+			}
+		})
+	}
+	batch := make([]map[string]any, 100)
+	for i := range batch {
+		batch[i] = map[string]any{"id": i + 1}
+	}
+	calls := 0
+	_, err := versionInventory(func(string, string) (any, error) {
+		calls++
+		if calls == 1 {
+			return batch, nil
+		}
+		return nil, ErrObjectNotFound
+	}, "versions")
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatal("disappearance during pagination was accepted", err)
+	}
+}
+
+func TestPruneAbsentPackageNeedsNoRegistryOrWorkflowReads(t *testing.T) {
+	api := func(path, method string) (any, error) {
+		if method != "GET" {
+			t.Fatal("empty cache caused a mutation", method)
+		}
+		switch path {
+		case "users/test":
+			return map[string]any{"type": "User"}, nil
+		case "users/test/packages/container/infra-ci/versions?per_page=100&page=1":
+			return nil, ErrObjectNotFound
+		default:
+			t.Fatal("unexpected inventory request", path)
+			return nil, nil
+		}
+	}
+	if deleted, err := Prune(api, nil, cacheTestRepository, "", io.Discard); err != nil || deleted != 0 {
+		t.Fatal("absent package blocked cleanup", deleted, err)
 	}
 }
 
