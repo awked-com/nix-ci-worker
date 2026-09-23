@@ -379,7 +379,7 @@ type inspectedVersion struct {
 	owned  bool
 }
 
-func inspectVersions(storage Storage, repository, sourceRepository string, versions []Version, log io.Writer) ([]inspectedVersion, error) {
+func inspectVersions(storage Storage, repository string, versions []Version, log io.Writer) ([]inspectedVersion, error) {
 	// Only immutable manifests are read concurrently. Complete the entire plan
 	// before deleting anything; do not turn a failed scan into partial cleanup.
 	inspected := make([]inspectedVersion, len(versions))
@@ -400,11 +400,7 @@ func inspectVersions(storage Storage, repository, sourceRepository string, versi
 					err = errors.New("retention manifest digest mismatch")
 				}
 				raw, marked := manifest.Annotations[retentionAnnotation]
-				sourceAnnotation := "org.opencontainers.image.source"
-				if repository == sourceRepository+"-pool" {
-					sourceAnnotation = poolSourceAnnotation
-				}
-				owned := marked && manifest.Annotations[sourceAnnotation] == "https://github.com/"+strings.TrimPrefix(sourceRepository, "ghcr.io/")
+				owned := marked && manifest.Annotations["org.opencontainers.image.source"] == "https://github.com/"+strings.TrimPrefix(repository, "ghcr.io/")
 				var record retentionRecord
 				if err == nil && owned {
 					decoder := json.NewDecoder(strings.NewReader(raw))
@@ -441,7 +437,6 @@ func inspectVersions(storage Storage, repository, sourceRepository string, versi
 type retentionPlan struct {
 	endpoint, latest string
 	versions         []Version
-	pool             *poolPackage
 }
 
 func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun string, log io.Writer) (*retentionPlan, error) {
@@ -516,7 +511,7 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun strin
 		delete(activeRuns, finalizingRun)
 	}
 
-	inspected, err := inspectVersions(storage, repository, repository, versions, log)
+	inspected, err := inspectVersions(storage, repository, versions, log)
 	if err != nil {
 		return nil, err
 	}
@@ -591,11 +586,7 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun strin
 
 		return candidates[i].UpdatedAt < candidates[j].UpdatedAt
 	})
-	pool, err := planPoolCleanup(api, storage, repository, endpoint, activeRuns, log)
-	if err != nil {
-		return nil, err
-	}
-	return &retentionPlan{endpoint: endpoint, latest: latest, versions: candidates, pool: pool}, nil
+	return &retentionPlan{endpoint: endpoint, latest: latest, versions: candidates}, nil
 }
 
 func Prune(api GitHubAPI, storage Storage, repository, finalizingRun string, log io.Writer) (deleted int, err error) {
@@ -618,12 +609,8 @@ func Prune(api GitHubAPI, storage Storage, repository, finalizingRun string, log
 	if err != nil {
 		return 0, err
 	}
-	poolPackages := 0
-	if plan.pool != nil {
-		poolPackages = 1
-	}
 	if log != nil {
-		fmt.Fprintf(log, "Retention: planned %d version deletions and %d pool package deletions (%.1fs)\n", len(plan.versions), poolPackages, time.Since(started).Seconds())
+		fmt.Fprintf(log, "Retention: planned %d version deletions (%.1fs)\n", len(plan.versions), time.Since(started).Seconds())
 	}
 	deletionStarted := time.Now()
 
@@ -666,16 +653,8 @@ func Prune(api GitHubAPI, storage Storage, repository, finalizingRun string, log
 		deleted++
 	}
 
-	phase = "deleting the pool package"
-	if plan.pool != nil {
-		if err := deletePoolPackage(api, *plan.pool); err != nil {
-			return deleted, err
-		}
-		deleted += len(plan.pool.versions)
-	}
-
 	if log != nil {
-		fmt.Fprintf(log, "Retention: deleted %d versions individually and %d pool packages (%d versions total; %.1fs; total %.1fs)\n", len(plan.versions), poolPackages, deleted, time.Since(deletionStarted).Seconds(), time.Since(started).Seconds())
+		fmt.Fprintf(log, "Retention: deleted %d versions (%.1fs; total %.1fs)\n", deleted, time.Since(deletionStarted).Seconds(), time.Since(started).Seconds())
 	}
 
 	return deleted, nil

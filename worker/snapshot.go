@@ -15,10 +15,9 @@ import (
 )
 
 const (
-	CatalogTitle         = "org.opencontainers.image.title"
-	CatalogLimit         = 256 * 1024 * 1024
-	SnapshotFormat       = "infra-ci-snapshot"
-	poolSourceAnnotation = "com.awked.infra-ci.pool-source"
+	CatalogTitle   = "org.opencontainers.image.title"
+	CatalogLimit   = 256 * 1024 * 1024
+	SnapshotFormat = "infra-ci-snapshot"
 )
 
 func ResultTag(run, system string, attempt int) string {
@@ -424,11 +423,6 @@ func (s *Snapshot) PreferUpstream() error {
 }
 
 func (s *Snapshot) Publish(tag string, recipients Secret) (string, error) {
-	return s.publish(tag, recipients, s.Repository)
-}
-
-// Temporary packages still belong to the repository that runs the workflow.
-func (s *Snapshot) publish(tag string, recipients Secret, sourceRepository string) (string, error) {
 	if err := s.ValidateRecords(); err != nil {
 		return "", err
 	}
@@ -509,14 +503,9 @@ func (s *Snapshot) publish(tag string, recipients Secret, sourceRepository strin
 		Config:        config,
 		Layers:        descriptors,
 		Annotations: map[string]string{
-			"org.opencontainers.image.source": "https://github.com/" + strings.TrimPrefix(sourceRepository, "ghcr.io/"),
+			"org.opencontainers.image.source": "https://github.com/" + strings.TrimPrefix(s.Repository, "ghcr.io/"),
 			CatalogTitle:                      "NixOS binary cache",
 		},
-	}
-	if retention.Kind == "control" {
-		// Do not link PAT-created pool packages to the public workflow repository.
-		s.Manifest.Annotations[poolSourceAnnotation] = s.Manifest.Annotations["org.opencontainers.image.source"]
-		delete(s.Manifest.Annotations, "org.opencontainers.image.source")
 	}
 	if len(retentionJSON) != 0 {
 		s.Manifest.Annotations[retentionAnnotation] = string(retentionJSON)

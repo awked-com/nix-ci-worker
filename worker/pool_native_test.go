@@ -40,8 +40,8 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 		t.Fatalf("evaluate: %v\n%s", err, &diagnostics)
 	}
 	identity, recipients := cacheKeys(t)
-	storage := &repositoryCache{}
-	bus, err := newPoolBus(storage, cacheTestRepository, "123", system, 1, identity, recipients, "native-fixture")
+	storage := newMemoryCache()
+	bus, err := newPoolBus(storage, newMemoryCoordination(), cacheTestRepository, "123", system, 1, identity, recipients, "native-fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,14 +152,14 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 	for name, file := range result.Files {
 		final.Files[name] = file
 	}
-	before := len(storage.cache(cacheTestRepository).objects)
+	before := len(storage.objects)
 	if _, err = PublishStore(source, map[string]bool{output: true}, final, inputs, Secret{Data: signing}, recipients, log, knownUpstream{}); err != nil {
 		t.Fatalf("final publication: %v\n%s", err, &diagnostics)
 	}
 	if !strings.Contains(final.Narinfos[NarinfoKey(output)], "Sig: registry-fixture:") {
 		t.Fatal("final output was not signed by coordinator")
 	}
-	if len(storage.cache(cacheTestRepository).objects) != before {
+	if len(storage.objects) != before {
 		t.Fatal("verified output archive was uploaded twice")
 	}
 	rejectedStore, err := filepath.EvalSymlinks(t.TempDir())
@@ -173,7 +173,7 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 	}
 }
 
-func TestNativeRegistryPoolBuildsAndFinalizesDependencyGraph(t *testing.T) {
+func TestNativePoolBuildsAndFinalizesDependencyGraph(t *testing.T) {
 	nativeEnabled(t)
 	t.Setenv("GITHUB_ACTIONS", "")
 	system, err := NativeSystem()
@@ -189,8 +189,8 @@ func TestNativeRegistryPoolBuildsAndFinalizesDependencyGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity, recipients := cacheKeys(t)
-	storage := &repositoryCache{}
-	bus, err := newPoolBus(storage, cacheTestRepository, "456", system, 1, identity, recipients, "native-pool")
+	storage := newMemoryCache()
+	bus, err := newPoolBus(storage, newMemoryCoordination(), cacheTestRepository, "456", system, 1, identity, recipients, "native-pool")
 	if err != nil {
 		t.Fatal(err)
 	}

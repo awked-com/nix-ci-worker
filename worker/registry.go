@@ -140,7 +140,6 @@ type registryToken struct {
 
 type Registry struct {
 	auth                                Secret
-	repositoryAuth                      map[string]Secret
 	HTTP, UploadHTTP                    *http.Client
 	tokensMu, writeTokensMu, cooldownMu sync.Mutex
 	tokens, writeTokens                 map[string]registryToken
@@ -374,14 +373,10 @@ func (r *Registry) token(repository, rejected string, write bool) (string, error
 		return "", err
 	}
 
-	credential := r.auth
-	if scoped, ok := r.repositoryAuth[repository]; ok {
-		credential = scoped
-	}
 	lock, tokens := &r.tokensMu, r.tokens
 	scope := "pull"
 	if write {
-		if len(credential.Data) == 0 {
+		if len(r.auth.Data) == 0 {
 			return "", errors.New("publishing requires GHCR write credentials")
 		}
 
@@ -402,8 +397,8 @@ func (r *Registry) token(repository, rejected string, write bool) (string, error
 		"scope":   {"repository:" + owner + "/" + packageName + ":" + scope},
 	}
 	headers := http.Header{}
-	if len(credential.Data) != 0 {
-		auth, err := basicAuth(credential)
+	if len(r.auth.Data) != 0 {
+		auth, err := basicAuth(r.auth)
 		if err != nil {
 			return "", err
 		}

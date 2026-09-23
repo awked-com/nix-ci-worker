@@ -257,6 +257,8 @@ func (p *BuildPool) remoteTask(ctx context.Context, runner int, remote poolMessa
 	if err := p.bus.write("assignment", runner, assignment); err != nil {
 		return nil, err
 	}
+	assigned := time.Now()
+	acknowledged := false
 	ticker := time.NewTicker(p.timing.poll)
 	defer ticker.Stop()
 	for {
@@ -268,6 +270,9 @@ func (p *BuildPool) remoteTask(ctx context.Context, runner int, remote poolMessa
 			return nil, errors.New("builder assignment sequence changed")
 		}
 		if status.Sequence == remote.Sequence {
+			if status.State == "busy" {
+				acknowledged = true
+			}
 			if status.State == "failed" {
 				return nil, errors.New("builder task failed")
 			}
@@ -294,6 +299,11 @@ func (p *BuildPool) remoteTask(ctx context.Context, runner int, remote poolMessa
 				}
 				return snapshot, nil
 			}
+		}
+		// An evicted assignment must not wait forever on a helper that keeps
+		// publishing ready heartbeats without ever receiving the task.
+		if !acknowledged && time.Since(assigned) >= p.timing.lease {
+			return nil, errors.New("builder did not acknowledge assignment")
 		}
 		select {
 		case <-ctx.Done():

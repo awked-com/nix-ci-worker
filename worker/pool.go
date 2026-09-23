@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -20,6 +21,7 @@ import (
 )
 
 const RunnersPerSystem = 3
+const coordinationLimit = 1024 * 1024
 const poolStartupTimeout = 10 * time.Minute
 const poolLease = 5 * time.Minute
 const poolPoll = 2 * time.Second
@@ -54,58 +56,67 @@ type poolEnvelope struct {
 	MAC  string `json:"mac"`
 }
 
-type poolRecord struct {
-	digest string
-	data   []byte
+// Coordination holds only encrypted control records. Build inputs and outputs
+// continue to use Storage so cache retention does not affect live leases.
+type coordinationStore interface {
+	Write(key string, data []byte) error
+	Read(prefix, previous string) (key string, data []byte, err error)
 }
 
-type poolReads struct {
+type poolRecord struct {
 	sync.Mutex
-	records map[string]poolRecord
+	key  string
+	data []byte
+	sent time.Time
+}
+
+type poolRecords struct {
+	sync.Mutex
+	records map[string]*poolRecord
+}
+
+func (r *poolRecords) get(key string) *poolRecord {
+	r.Lock()
+	defer r.Unlock()
+	if r.records[key] == nil {
+		r.records[key] = &poolRecord{}
+	}
+	return r.records[key]
 }
 
 type poolBus struct {
 	controlRecipients       Secret
 	storage                 Storage
-	control                 Storage
+	control                 coordinationStore
 	repository, run, system string
 	attempt                 int
 	identity, recipients    Secret
 	key                     []byte
-	close                   func()
-	reads                   *poolReads
+	records                 *poolRecords
 }
 
-func newPoolBus(storage Storage, repository, run, system string, attempt int, identity, recipients Secret, binding any) (*poolBus, error) {
-	if _, ok := Systems[system]; !ok || attempt < 1 || !regexpRun.MatchString(run) {
+func newPoolBus(storage Storage, control coordinationStore, repository, run, system string, attempt int, identity, recipients Secret, binding any) (*poolBus, error) {
+	if _, ok := Systems[system]; !ok || attempt < 1 || !regexpRun.MatchString(run) || run[0] == '0' || control == nil {
 		return nil, errors.New("invalid builder pool")
 	}
 	if len(identity.Data) == 0 {
 		return nil, errors.New("missing builder identity")
 	}
-	raw, err := json.Marshal([]any{"infra-ci-registry-pool-1", repository, run, system, attempt, binding})
+	raw, err := json.Marshal([]any{"infra-ci-actions-pool-1", repository, run, system, attempt, binding})
 	if err != nil {
 		return nil, err
 	}
 	mac := hmac.New(sha256.New, identity.Data)
 	mac.Write(raw)
-	b := &poolBus{storage: storage, control: storage, repository: repository, run: run, system: system, attempt: attempt, identity: identity, recipients: recipients, key: mac.Sum(nil), close: func() {}}
-	b.reads = &poolReads{records: map[string]poolRecord{}}
-	// Lease traffic must not wait behind large NAR uploads or their retry budget.
-	if registry, ok := storage.(*Registry); ok {
-		control := NewRegistry(registry.auth)
-		control.repositoryAuth = registry.repositoryAuth
-		control.HTTP.Timeout, control.UploadHTTP.Timeout = 30*time.Second, 30*time.Second
-		control.uploadRetries = 2
-		b.control, b.close = control, control.Close
-	}
 	controlRecipients, err := IdentityRecipients(identity)
 	if err != nil {
-		b.close()
 		return nil, err
 	}
-	b.controlRecipients = controlRecipients
-	return b, nil
+	return &poolBus{
+		storage: storage, control: control, repository: repository, run: run, system: system, attempt: attempt,
+		identity: identity, recipients: recipients, key: mac.Sum(nil), controlRecipients: controlRecipients,
+		records: &poolRecords{records: map[string]*poolRecord{}},
+	}, nil
 }
 
 func poolNonce() string {
@@ -120,8 +131,9 @@ func (b *poolBus) tag(role string, runner int) string {
 	return fmt.Sprintf("nixos-cache-pool-%s-%d-%s-%s-%d", b.run, b.attempt, b.system, role, runner)
 }
 
-func (b *poolBus) controlRepository() string {
-	return b.repository + "-pool"
+func (b *poolBus) prefix(role string, runner int) string {
+	// Cache keys reveal no source-derived data and cannot match another request.
+	return "nix-ci-control-v1-" + hex.EncodeToString(b.authenticate("mailbox", []byte(b.tag(role, runner)))) + "-"
 }
 
 func (b *poolBus) authenticate(tag string, data []byte) []byte {
@@ -132,50 +144,71 @@ func (b *poolBus) authenticate(tag string, data []byte) []byte {
 }
 
 func (b *poolBus) write(role string, runner int, message poolMessage) error {
+	prefix := b.prefix(role, runner)
+	record := b.records.get(prefix)
+	record.Lock()
+	defer record.Unlock()
 	message.Sent = time.Now().UTC()
 	raw, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
-	tag := b.tag(role, runner)
-	snapshot := NewSnapshot(b.control, b.controlRepository())
-	snapshot.Metadata = map[string]any{"kind": "control", "run": b.run, "message": poolEnvelope{raw, hex.EncodeToString(b.authenticate(tag, raw))}}
-	_, err = snapshot.publish(tag, b.controlRecipients, b.repository)
-	return err
+	key := prefix + poolNonce()
+	envelope, err := json.Marshal(poolEnvelope{raw, hex.EncodeToString(b.authenticate(key, raw))})
+	if err != nil {
+		return err
+	}
+	stream, err := EncryptedStream(bytes.NewReader(envelope), b.controlRecipients)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	encrypted, err := io.ReadAll(stream)
+	if err != nil {
+		return err
+	}
+	return b.control.Write(key, encrypted)
 }
 
 func (b *poolBus) read(role string, runner int) (*poolMessage, error) {
-	tag := b.tag(role, runner)
-	manifest, digest, err := b.control.GetManifest(b.controlRepository(), tag)
+	prefix := b.prefix(role, runner)
+	record := b.records.get(prefix)
+	record.Lock()
+	defer record.Unlock()
+	key, encrypted, err := b.control.Read(prefix, record.key)
 	if err != nil {
 		return nil, err
 	}
-	b.reads.Lock()
-	record := b.reads.records[tag]
-	b.reads.Unlock()
-	// Poll the tag for changes without downloading unchanged catalogs again.
-	// Keep the original Sent timestamp so cached reads cannot extend a lease.
-	if record.digest != digest {
-		snapshot, err := loadSnapshot(b.control, b.controlRepository(), manifest, digest, b.identity)
+	if key != record.key {
+		if len(key) != len(prefix)+32 || key[:len(prefix)] != prefix {
+			return nil, errors.New("invalid coordination record key")
+		}
+		stream, err := decryptedStream(bytes.NewReader(encrypted), b.identity)
 		if err != nil {
 			return nil, err
 		}
-		raw, err := json.Marshal(snapshot.Metadata["message"])
-		var envelope poolEnvelope
-		if err == nil {
-			err = json.Unmarshal(raw, &envelope)
+		raw, err := io.ReadAll(io.LimitReader(stream, coordinationLimit+1))
+		stream.Close()
+		if err != nil || len(raw) > coordinationLimit {
+			return nil, errors.New("invalid pool envelope")
 		}
-		if err != nil {
+		var envelope poolEnvelope
+		if err := json.Unmarshal(raw, &envelope); err != nil {
 			return nil, errors.New("invalid pool envelope")
 		}
 		signature, err := hex.DecodeString(envelope.MAC)
-		if err != nil || !hmac.Equal(signature, b.authenticate(tag, envelope.Data)) {
+		if err != nil || !hmac.Equal(signature, b.authenticate(key, envelope.Data)) {
 			return nil, errors.New("pool message authentication failed")
 		}
-		record = poolRecord{digest, envelope.Data}
-		b.reads.Lock()
-		b.reads.records[tag] = record
-		b.reads.Unlock()
+		var message poolMessage
+		if err := json.Unmarshal(envelope.Data, &message); err != nil {
+			return nil, errors.New("invalid pool message")
+		}
+		// Prefix lookup may temporarily return an earlier cache entry. It must not
+		// roll back a task, resurrect a session, or extend the verified lease.
+		if record.key == "" || message.Sent.After(record.sent) {
+			record.key, record.data, record.sent = key, envelope.Data, message.Sent
+		}
 	}
 	var message poolMessage
 	if err := json.Unmarshal(record.data, &message); err != nil {
@@ -288,7 +321,6 @@ func (p *BuildPool) Close() {
 	if err := p.bus.write("coordinator", 0, poolMessage{Session: p.session, State: "stop"}); err != nil {
 		fmt.Fprintln(p.log, "warning: builder shutdown publication failed; helpers will expire their leases")
 	}
-	p.bus.close()
 }
 
 func validFeatures(features []string) bool {

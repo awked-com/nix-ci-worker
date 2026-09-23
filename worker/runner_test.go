@@ -724,8 +724,8 @@ func TestRunnerEnvironmentStripsCredentialsAndActionTracking(t *testing.T) {
 	for _, name := range []string{
 		"CI_IDENTITY",
 		"REGISTRY_TOKEN",
-		"CI_POOL_TOKEN",
-		"CI_POOL_USER",
+		"ACTIONS_RUNTIME_TOKEN",
+		"ACTIONS_RESULTS_URL",
 		"NIX_SIGNING_KEY",
 		"INPUT_REQUEST",
 		"ACTIONS_TOKEN",

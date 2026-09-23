@@ -51,7 +51,8 @@ anonymous reads; payloads remain encrypted. SIGINT or SIGTERM stops the server.
 
 Without arguments the executable runs the GitHub Actions worker protocol.
 Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
-source flake.
+source flake. Select host system derivations and required checks there; their
+transitive dependencies determine which packages need building on each platform.
 Optional host/package selection follows NixOS configuration attributes; see
 [`SelectedTargets`](worker/planner.go). Supported systems and runner labels are
 owned by [`Systems`](worker/planner.go).
@@ -74,7 +75,7 @@ The workflow supplies these environment variables:
 | `CI_RECIPIENTS` | Newline-separated age recipients |
 | `NIX_SIGNING_KEY` | Final cache signing key for coordinators |
 | `REGISTRY_USER`, `REGISTRY_TOKEN` | Cache registry and GitHub Actions API credentials |
-| `CI_POOL_USER`, `CI_POOL_TOKEN` | Dedicated pool account and classic PAT with `read:packages`, `write:packages`, and `delete:packages` |
+| `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL` | Automatic Actions cache credentials, supplied by the JavaScript action launching the worker |
 | `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` | Actions run identity |
 | `GITHUB_OUTPUT` | Actions output file used by admission |
 
@@ -83,18 +84,21 @@ parent cache digest, attempt, coordinator matrix, helper matrix, and resolved
 source revision. Retry jobs with those admitted inputs. Finalization expects
 all admitted coordinators and performs retention before publication.
 
-The temporary `<cache-package>-pool` package must be private and unlinked from
-repositories. Supply `CI_POOL_USER` and `CI_POOL_TOKEN` as Actions secrets to all
-worker jobs. The account must be allowed to create private organization packages,
-with SSO authorization if required. Cache and Actions requests use
-`REGISTRY_TOKEN`; pool requests use the dedicated PAT and need no package
-Actions-access grant. A public workflow's `GITHUB_TOKEN` does not ensure private
-creation, even with organization permission inheritance disabled.
+Coordinators and helpers exchange small encrypted, authenticated messages through
+GitHub Actions cache v2. The workflow must launch the worker from a JavaScript
+action so it inherits GitHub's short-lived runtime credentials; ordinary shell
+steps do not receive them automatically. No pool account, PAT, repository writes,
+or separately provisioned service is needed. Admission and finalization do not
+use the coordination service.
 
-Admission creates a bootstrap record without runner data, then checks pool
-privacy before coordination. Verify private creation on the first run. If a
-public or linked pool exists, stop builds and delete that pool before retrying;
-keep the cache package. Finalization deletes the pool package.
+Each mailbox update has an immutable, opaque key bound to the request, source
+revision, run, attempt, platform, and runner. Prefix lookup selects the latest
+entry; cached or stale reads never renew a lease. Missing or evicted records
+expire through the existing lease handling, and failed helper work returns to
+the coordinator. GitHub automatically evicts unused entries after seven days.
+The final cache and encrypted helper build payloads remain in the main GHCR
+package; no separate `-pool` package is created or accessed. Existing unused pool
+packages and credentials are not required by this protocol.
 
 Helpers must not receive the final cache signing key. Coordination records and
 results are authenticated and bound to the request, revision, run, attempt, and

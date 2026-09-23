@@ -43,7 +43,7 @@ func TestAdmissionHasTwoHelpersPerPlatform(t *testing.T) {
 func poolFixture(t *testing.T) *poolBus {
 	t.Helper()
 	identity, recipients := cacheKeys(t)
-	bus, err := newPoolBus(newMemoryCache(), cacheTestRepository, "12", "x86_64-linux", 1, identity, recipients, "source-commit")
+	bus, err := newPoolBus(newMemoryCache(), newMemoryCoordination(), cacheTestRepository, "12", "x86_64-linux", 1, identity, recipients, "source-commit")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func awaitPool(t *testing.T, check func() bool) {
 	}
 }
 
-func TestPoolMessagesAreEncryptedAndBoundToRunSourceAndRunner(t *testing.T) {
+func TestPoolMessagesAreEncryptedAndBoundToRequestAndRecord(t *testing.T) {
 	bus := poolFixture(t)
 	message := poolMessage{Session: "session", Instance: "instance", Sequence: 7, State: "build", Task: &poolTask{Installable: "private-derivation"}}
 	if err := bus.write("assignment", 2, message); err != nil {
@@ -71,47 +71,63 @@ func TestPoolMessagesAreEncryptedAndBoundToRunSourceAndRunner(t *testing.T) {
 	if err != nil || received.Task.Installable != "private-derivation" || received.Sequence != 7 {
 		t.Fatal(received, err)
 	}
-	storage := bus.storage.(*memoryCache)
-	storage.mu.Lock()
-	for _, body := range storage.manifests {
-		if strings.Contains(string(body), "private-derivation") {
-			t.Fatal("plaintext assignment")
-		}
+	control := bus.control.(*memoryCoordination)
+	original := control.latest[bus.prefix("assignment", 2)]
+	encrypted := control.objects[original]
+	if bytes.Contains(encrypted, []byte("private-derivation")) {
+		t.Fatal("plaintext assignment")
 	}
-	for _, body := range storage.objects {
-		if strings.Contains(string(body), "private-derivation") {
-			t.Fatal("plaintext assignment blob")
-		}
+
+	for _, change := range []string{"runner", "run", "system", "attempt", "repository", "source", "request"} {
+		t.Run(change, func(t *testing.T) {
+			repository, run, system, attempt, binding, runner := bus.repository, bus.run, bus.system, bus.attempt, "source-commit", 2
+			switch change {
+			case "runner":
+				runner = 1
+			case "run":
+				run = "13"
+			case "system":
+				system = "aarch64-linux"
+			case "attempt":
+				attempt++
+			case "repository":
+				repository = "ghcr.io/test/other"
+			default:
+				binding = change
+			}
+			other, err := newPoolBus(bus.storage, control, repository, run, system, attempt, bus.identity, bus.recipients, binding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if other.prefix("assignment", runner) == bus.prefix("assignment", 2) {
+				t.Fatal("mailbox binding collision")
+			}
+			key := other.prefix("assignment", runner) + poolNonce()
+			control.Write(key, encrypted)
+			if _, err := other.read("assignment", runner); err == nil {
+				t.Fatal("accepted replay into another binding")
+			}
+		})
 	}
-	storage.tags[bus.tag("assignment", 3)] = storage.tags[bus.tag("assignment", 2)]
-	storage.mu.Unlock()
-	if _, err := bus.read("assignment", 3); err == nil {
-		t.Fatal("accepted another runner's assignment")
-	}
-	for _, binding := range []string{"other-source", "other-request"} {
-		other, err := newPoolBus(storage, bus.repository, bus.run, bus.system, bus.attempt, bus.identity, bus.recipients, binding)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := other.read("assignment", 2); err == nil {
-			t.Fatal("accepted a different source binding")
-		}
-	}
-	copied := *bus
-	copied.run = "13"
-	storage.mu.Lock()
-	storage.tags[copied.tag("assignment", 2)] = storage.tags[bus.tag("assignment", 2)]
-	storage.mu.Unlock()
-	if _, err := copied.read("assignment", 2); err == nil {
-		t.Fatal("accepted another run's assignment")
+	// Copying even a valid message to a newer entry must not reset the mailbox.
+	control.Write(bus.prefix("assignment", 2)+poolNonce(), encrypted)
+	if _, err := bus.read("assignment", 2); err == nil {
+		t.Fatal("accepted message under a different record key")
 	}
 	// Possession of the public age recipient is insufficient to forge commands.
-	snapshot := NewSnapshot(storage, bus.controlRepository())
+	key := bus.prefix("assignment", 2) + poolNonce()
 	raw, _ := json.Marshal(message)
-	snapshot.Metadata["message"] = poolEnvelope{raw, strings.Repeat("0", 64)}
-	if _, err := snapshot.Publish(bus.tag("assignment", 2), bus.recipients); err != nil {
+	envelope, _ := json.Marshal(poolEnvelope{raw, strings.Repeat("0", 64)})
+	stream, err := EncryptedStream(bytes.NewReader(envelope), bus.controlRecipients)
+	if err != nil {
 		t.Fatal(err)
 	}
+	forged, err := io.ReadAll(stream)
+	stream.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.Write(key, forged)
 	if _, err := bus.read("assignment", 2); err == nil {
 		t.Fatal("accepted forged assignment")
 	}
@@ -127,8 +143,9 @@ func TestPoolRejectsExpiredAndFutureLeases(t *testing.T) {
 	}
 }
 
-func TestPoolReusesAuthenticatedCatalogUntilTagChanges(t *testing.T) {
+func TestPoolCachedReadsPreserveLeaseAndIgnoreStaleEntries(t *testing.T) {
 	bus := poolFixture(t)
+	control := bus.control.(*memoryCoordination)
 	if err := bus.write("status", 2, poolMessage{State: "ready"}); err != nil {
 		t.Fatal(err)
 	}
@@ -136,34 +153,34 @@ func TestPoolReusesAuthenticatedCatalogUntilTagChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldKey := control.latest[bus.prefix("status", 2)]
 	sent := first.Sent
 	first.State = "changed by caller"
-	bus.control = unavailableCatalogs{bus.storage}
 	for range 3 {
 		cached, err := bus.read("status", 2)
 		if err != nil || cached.State != "ready" || cached.Sent != sent {
-			t.Fatal("cached control record changed or needed another catalog download", cached, err)
+			t.Fatal("cached record or lease changed", cached, err)
 		}
+	}
+	if control.downloads != 1 {
+		t.Fatal("unchanged record downloaded again", control.downloads)
 	}
 	if err := bus.write("status", 2, poolMessage{State: "done"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bus.read("status", 2); err == nil {
-		t.Fatal("changed record reused old contents without reading its catalog")
-	}
-	bus.control = bus.storage
 	updated, err := bus.read("status", 2)
 	if err != nil || updated.State != "done" {
 		t.Fatal(updated, err)
 	}
-	forged := NewSnapshot(bus.storage, bus.controlRepository())
-	raw, _ := json.Marshal(poolMessage{State: "ready"})
-	forged.Metadata["message"] = poolEnvelope{raw, strings.Repeat("0", 64)}
-	if _, err := forged.Publish(bus.tag("status", 2), bus.recipients); err != nil {
-		t.Fatal(err)
+	control.latest[bus.prefix("status", 2)] = oldKey
+	stale, err := bus.read("status", 2)
+	if err != nil || stale.State != "done" || stale.Sent != updated.Sent {
+		t.Fatal("stale entry rolled back mailbox", stale, err)
 	}
-	if _, err := bus.read("status", 2); err == nil {
-		t.Fatal("cached record bypassed authentication after the tag changed")
+	// Missing entries cannot become a new lease, including after cache eviction.
+	delete(control.latest, bus.prefix("status", 2))
+	if _, err := bus.read("status", 2); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatal(err)
 	}
 }
 
@@ -356,19 +373,19 @@ func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 }
 
 type failingPoolStatusStorage struct {
-	Storage
+	coordinationStore
 	tag       string
 	failed    chan struct{}
 	once      sync.Once
 	recovered atomic.Bool
 }
 
-func (s *failingPoolStatusStorage) PutManifest(repository, tag string, manifest Manifest) (string, error) {
-	if tag == s.tag && !s.recovered.Load() {
+func (s *failingPoolStatusStorage) Write(key string, data []byte) error {
+	if strings.HasPrefix(key, s.tag) && !s.recovered.Load() {
 		s.once.Do(func() { close(s.failed) })
-		return "", errors.New("status upload unavailable")
+		return errors.New("status upload unavailable")
 	}
-	return s.Storage.PutManifest(repository, tag, manifest)
+	return s.coordinationStore.Write(key, data)
 }
 
 func TestHelperCanCancelWhileFinalStatusUploadFails(t *testing.T) {
@@ -376,7 +393,7 @@ func TestHelperCanCancelWhileFinalStatusUploadFails(t *testing.T) {
 	if err := bus.write("coordinator", 0, poolMessage{Session: "session", State: "stop"}); err != nil {
 		t.Fatal(err)
 	}
-	storage := &failingPoolStatusStorage{Storage: bus.control, tag: bus.tag("status", 2), failed: make(chan struct{})}
+	storage := &failingPoolStatusStorage{coordinationStore: bus.control, tag: bus.prefix("status", 2), failed: make(chan struct{})}
 	bus.control = storage
 	defer storage.recovered.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())

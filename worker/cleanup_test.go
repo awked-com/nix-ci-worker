@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type retentionFixture struct {
@@ -41,6 +42,22 @@ func (s retentionStorage) GetManifest(repository, reference string) (Manifest, s
 		return Manifest{}, "", ErrObjectNotFound
 	}
 	return manifest, reference, nil
+}
+
+type recheckedRetentionStorage struct {
+	Storage
+	reads int
+	check func() error
+}
+
+func (s *recheckedRetentionStorage) ManifestDigest(repository, reference string) (string, error) {
+	s.reads++
+	if s.reads > 1 {
+		if err := s.check(); err != nil {
+			return "", err
+		}
+	}
+	return s.Storage.ManifestDigest(repository, reference)
 }
 
 func newRetentionFixture() *retentionFixture {
@@ -284,27 +301,52 @@ func TestPruneRechecksCacheVersionsBeforeDeletion(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			f := newRetentionFixture()
 			f.add(1, []string{}, map[string]any{"kind": "commit", "run": "1"})
+			changed := make(chan struct{})
+			storage := &recheckedRetentionStorage{Storage: retentionStorage{fixture: f}, check: func() error {
+				switch change {
+				case "latest":
+					f.latest = ""
+				case "pin":
+					f.versions[1].Metadata.Container.Tags = []string{"keep"}
+				case "digest":
+					f.versions[1].Name = "sha256:" + strings.Repeat("f", 64)
+				case "updated":
+					f.versions[1].UpdatedAt = "2026-08-02T00:00:00Z"
+				}
+				close(changed)
+				return nil
+			}}
 			api := func(path, method string) (any, error) {
-				// Pool inspection finishes the plan. Change the cache before its
-				// first deletion to exercise the independent candidate recheck.
-				if path == "users/test/packages/container/infra-ci-pool" {
-					switch change {
-					case "latest":
-						f.latest = ""
-					case "pin":
-						f.versions[1].Metadata.Container.Tags = []string{"keep"}
-					case "digest":
-						f.versions[1].Name = "sha256:" + strings.Repeat("f", 64)
-					case "updated":
-						f.versions[1].UpdatedAt = "2026-08-02T00:00:00Z"
+				if strings.HasSuffix(path, "/versions/1") && method == "GET" {
+					select {
+					case <-changed:
+					case <-time.After(time.Second):
+						return nil, fmt.Errorf("latest check did not overlap candidate read")
 					}
 				}
 				return f.api(path, method)
 			}
-			if _, err := Prune(api, retentionStorage{fixture: f}, cacheTestRepository, "", io.Discard); err == nil || len(f.deleted) != 0 {
+			if _, err := Prune(api, storage, cacheTestRepository, "", io.Discard); err == nil || len(f.deleted) != 0 {
 				t.Fatal("deleted after cache changed", f.deleted, err)
 			}
 		})
+	}
+}
+
+func TestRetentionDoesNotAccessLegacyPoolPackage(t *testing.T) {
+	f := newRetentionFixture()
+	f.add(1, []string{}, map[string]any{"kind": "pool", "run": "1"})
+	f.add(2, []string{}, map[string]any{"kind": "control", "run": "1"})
+	api := func(path, method string) (any, error) {
+		if strings.Contains(path, "/infra-ci-pool") {
+			t.Error("retention accessed the retired pool package")
+			return nil, &githubStatusError{method: method, status: 403}
+		}
+		return f.api(path, method)
+	}
+	deleted, err := Prune(api, retentionStorage{fixture: f}, cacheTestRepository, "", io.Discard)
+	if err != nil || deleted != 2 || !reflect.DeepEqual(f.deleted, []int64{1, 2}) {
+		t.Fatal("legacy cache records were not cleaned up", deleted, f.deleted, err)
 	}
 }
 

@@ -286,7 +286,6 @@ func executePoolBuild(ctx context.Context, bus *poolBus, source string, runner i
 }
 
 func RunBuilder(source string, runner int, bus *poolBus, log io.Writer) error {
-	defer bus.close()
 	native, err := NativeSystem()
 	if err != nil || bus.system != native {
 		return errors.New("builder does not match the admitted platform")
