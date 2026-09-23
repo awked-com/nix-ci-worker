@@ -2,7 +2,6 @@ package worker
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -96,16 +95,17 @@ func NarinfoFields(value string) (map[string]string, error) {
 }
 
 type Snapshot struct {
-	Storage       Storage
-	Repository    string
-	Files         map[string]SnapshotFile
-	Narinfos      map[string]string
-	Metadata      map[string]any
-	Upstream      map[string][]string
-	Manifest      Manifest
-	Digest        string
-	ManifestBytes int64
-	mu            sync.Mutex
+	Storage           Storage
+	Repository        string
+	Files             map[string]SnapshotFile
+	Narinfos          map[string]string
+	Metadata          map[string]any
+	Upstream          map[string][]string
+	Manifest          Manifest
+	Digest            string
+	mu                sync.Mutex
+	catalogBlobs      map[string]Descriptor
+	catalogRecipients string
 }
 
 func NewSnapshot(storage Storage, repository string) *Snapshot {
@@ -181,77 +181,11 @@ func LoadSnapshot(storage Storage, repository, reference string, identity Secret
 }
 
 func loadSnapshot(storage Storage, repository string, manifest Manifest, digest string, identity Secret) (*Snapshot, error) {
-	result := NewSnapshot(storage, repository)
-	result.Manifest, result.Digest = manifest, digest
-	var catalog *Descriptor
-	reachable := map[string]Descriptor{}
-	for _, layer := range manifest.Layers {
-		reachable[layer.Digest] = layer
-		if layer.Annotations[CatalogTitle] != "files" {
-			continue
-		}
-		if catalog != nil {
-			return nil, errors.New("duplicate files catalog")
-		}
-		catalog = &layer
-	}
-
-	if catalog == nil || catalog.Digest == "" {
-		return nil, errors.New("missing files catalog")
-	}
-
-	stream, err := DecryptBlob(storage, repository, *catalog, identity)
+	view, err := openCatalog(storage, repository, manifest, digest, identity)
 	if err != nil {
 		return nil, err
 	}
-
-	compressed, err := gzip.NewReader(stream)
-	if err != nil {
-		stream.Close()
-		return nil, err
-	}
-
-	raw, err := readLimited(compressed, CatalogLimit)
-	compressed.Close()
-	if err == nil {
-		_, err = io.Copy(io.Discard, stream)
-	}
-
-	stream.Close()
-	if err != nil {
-		return nil, err
-	}
-
-	var data snapshotCatalog
-	if err = json.Unmarshal(raw, &data); err != nil {
-		return nil, err
-	}
-
-	if data.Format != SnapshotFormat || data.Version != 2 {
-		return nil, errors.New("unsupported catalog format")
-	}
-	if data.Files == nil {
-		return nil, errors.New("missing catalog files")
-	}
-
-	for _, file := range data.Files {
-		descriptor := file.Blob
-		target, ok := reachable[descriptor.Digest]
-		if !ok || target.Size != descriptor.Size || target.MediaType != descriptor.MediaType {
-			return nil, errors.New("catalog references an unreachable blob")
-		}
-	}
-
-	if data.Metadata == nil || data.Narinfos == nil || data.Upstream == nil {
-		return nil, errors.New("incomplete files catalog")
-	}
-	result.Files, result.Metadata, result.Narinfos, result.Upstream = data.Files, data.Metadata, data.Narinfos, data.Upstream
-
-	if err = result.ValidateRecords(); err != nil {
-		return nil, err
-	}
-
-	return result, nil
+	return view.loadAll(identity)
 }
 
 func (s *Snapshot) ValidateRecords() error {
@@ -357,6 +291,7 @@ func (s *Snapshot) Read(name string, identity Secret) (io.ReadCloser, error) {
 }
 
 func (s *Snapshot) Merge(other *Snapshot) error {
+	s.reuseCatalogs(other)
 	for path, refs := range other.Upstream {
 		if existing, ok := s.Upstream[path]; ok && !slices.Equal(existing, refs) {
 			return errors.New("conflicting upstream references")
@@ -367,21 +302,10 @@ func (s *Snapshot) Merge(other *Snapshot) error {
 
 	for name, value := range other.Narinfos {
 		if existing, ok := s.Narinfos[name]; ok {
-			left, err := NarinfoFields(existing)
-			if err != nil {
+			if err := matchingNarinfos(existing, value); err != nil {
 				return err
 			}
 
-			right, err := NarinfoFields(value)
-			if err != nil {
-				return err
-			}
-
-			for _, key := range []string{"StorePath", "NarHash", "NarSize", "References", "URL"} {
-				if left[key] != right[key] {
-					return errors.New("conflicting cache record")
-				}
-			}
 		} else {
 			s.Narinfos[name] = value
 		}
@@ -398,31 +322,37 @@ func (s *Snapshot) Merge(other *Snapshot) error {
 	return nil
 }
 
-func (s *Snapshot) PreferUpstream() error {
-	archives := map[string]bool{}
-	for name, value := range s.Narinfos {
-		fields, err := NarinfoFields(value)
-		if err != nil {
-			return err
-		}
+func matchingNarinfos(left, right string) error {
+	if left == right {
+		return nil
+	}
+	a, err := NarinfoFields(left)
+	if err != nil {
+		return err
+	}
+	b, err := NarinfoFields(right)
+	if err != nil {
+		return err
+	}
+	return matchingNarinfoFields(a, b)
+}
 
-		if _, ok := s.Upstream[fields["StorePath"]]; ok {
-			delete(s.Narinfos, name)
-		} else {
-			archives["cache/"+fields["URL"]] = true
+func matchingNarinfoFields(left, right map[string]string) error {
+	for _, key := range []string{"StorePath", "NarHash", "NarSize", "References", "URL"} {
+		if left[key] != right[key] {
+			return errors.New("conflicting cache record")
 		}
 	}
-
-	for name := range s.Files {
-		if strings.HasPrefix(name, "cache/nar/") && !archives[name] {
-			delete(s.Files, name)
-		}
-	}
-
 	return nil
 }
 
 func (s *Snapshot) Publish(tag string, recipients Secret) (string, error) {
+	if _, err := ManifestPath(tag); err != nil {
+		return "", err
+	}
+	if s.Metadata == nil {
+		return "", errors.New("missing catalog metadata")
+	}
 	if err := s.ValidateRecords(); err != nil {
 		return "", err
 	}
@@ -446,44 +376,12 @@ func (s *Snapshot) Publish(tag string, recipients Secret) (string, error) {
 		layers[d.Digest] = d
 	}
 
-	data := snapshotCatalog{
-		Format:   SnapshotFormat,
-		Version:  2,
-		Files:    s.Files,
-		Metadata: s.Metadata,
-		Narinfos: s.Narinfos,
-		Upstream: s.Upstream,
-	}
-	raw, err := json.Marshal(data)
+	descriptor, err := s.publishCatalog(recipients, layers)
 	if err != nil {
 		return "", err
 	}
-	if len(raw) > CatalogLimit {
-		return "", errors.New("catalog exceeds limit")
-	}
-
-	var compressed bytes.Buffer
-	gzipWriter, _ := gzip.NewWriterLevel(&compressed, 3)
-	if _, err = gzipWriter.Write(raw); err != nil {
-		return "", err
-	}
-
-	if err = gzipWriter.Close(); err != nil {
-		return "", err
-	}
-
-	stream, err := EncryptedStream(&compressed, recipients)
-	if err != nil {
-		return "", err
-	}
-
-	descriptor, err := s.Storage.UploadBlob(s.Repository, stream, true)
-	stream.Close()
-	if err != nil {
-		return "", err
-	}
-
 	descriptor.Annotations = map[string]string{CatalogTitle: "files"}
+	descriptor.MediaType = catalogRootMediaType
 	layers[descriptor.Digest] = descriptor
 
 	config, err := s.Storage.UploadBlob(s.Repository, strings.NewReader("{}"), false)
@@ -515,7 +413,6 @@ func (s *Snapshot) Publish(tag string, recipients Secret) (string, error) {
 		return "", err
 	}
 
-	s.ManifestBytes = int64(len(body))
 	if len(body) > metadataLimit {
 		return "", errors.New("manifest exceeds limit")
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"regexp"
@@ -22,6 +23,7 @@ type SnapshotReader struct {
 	mu                    sync.Mutex
 	stateMu               sync.RWMutex
 	snapshot              *Snapshot
+	views                 map[string]*catalogView
 	deadline, retryAfter  time.Time
 	refreshError          error
 	now                   func() time.Time
@@ -42,6 +44,7 @@ func newSnapshotReader(storage Storage, repository, reference string, identity c
 		identity:   identity,
 		log:        log,
 		now:        time.Now,
+		views:      map[string]*catalogView{},
 	}
 }
 
@@ -61,43 +64,189 @@ func (r *SnapshotReader) Current(name string) (*Snapshot, error) {
 	missing := r.snapshot == nil || (name != "" && !r.snapshot.HasFile(name))
 	now := r.now()
 	if !now.Before(r.deadline) || (missing && !now.Before(r.retryAfter)) {
-		manifest, digest, err := r.storage.GetManifest(r.repository, r.reference)
-		var loaded *Snapshot
-		if err == nil && (r.snapshot == nil || r.snapshot.Digest != digest) {
-			var identity Secret
-			identity, err = r.identity.read()
-			if err == nil {
-				loaded, err = loadSnapshot(r.storage, r.repository, manifest, digest, identity)
+		r.refresh()
+	}
+	if r.snapshot != nil && name != "" && !r.snapshot.HasFile(name) {
+		err := r.lookup(name)
+		if errors.Is(err, ErrObjectNotFound) {
+			// A superseded manifest can be collected while a client has only loaded
+			// its root. Retry the current heads before failing an uncached lookup.
+			r.refresh()
+			err = r.lookup(name)
+			if errors.Is(err, ErrObjectNotFound) {
+				err = errors.New("cache catalog references a missing blob")
 			}
 		}
-
-		if err != nil {
-			r.refreshError = fmt.Errorf("cache catalog refresh failed: %w", err)
-			r.deadline, r.retryAfter = r.now().Add(5*time.Second), r.now().Add(5*time.Second)
-			if r.log != nil {
-				fmt.Fprintln(r.log, r.refreshError)
-			}
-		} else {
-			if loaded != nil {
-				r.stateMu.Lock()
-				r.snapshot = loaded
-				r.stateMu.Unlock()
-			}
-
-			r.refreshError = nil
-			r.deadline, r.retryAfter = r.now().Add(30*time.Second), r.now().Add(5*time.Second)
-			if strings.HasPrefix(r.reference, "sha256:") {
-				r.deadline = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
-				r.retryAfter = r.deadline
-			}
+		if err != nil && !r.snapshot.HasFile(name) {
+			return nil, fmt.Errorf("cache catalog lookup failed: %w", err)
 		}
 	}
-
 	if r.refreshError != nil && (r.snapshot == nil || (name != "" && !r.snapshot.HasFile(name))) {
 		return nil, r.refreshError
 	}
-
+	if r.snapshot == nil {
+		return nil, ErrObjectNotFound
+	}
 	return r.snapshot, nil
+}
+
+func (r *SnapshotReader) references() []string {
+	if r.reference != "nixos-cache-latest" {
+		return []string{r.reference}
+	}
+	return append(platformTags(), "nixos-cache-latest")
+}
+
+func (r *SnapshotReader) refresh() {
+	var failures []error
+	references := r.references()
+	platformsReady := true
+	for _, reference := range references {
+		if reference == "nixos-cache-latest" && len(references) > 1 && platformsReady {
+			delete(r.views, reference)
+			break
+		}
+		prior := r.views[reference]
+		var digest string
+		var manifest Manifest
+		var err error
+		if prior != nil {
+			digest, err = r.storage.ManifestDigest(r.repository, reference)
+		}
+		if err == nil && (prior == nil || prior.digest != digest) {
+			manifest, digest, err = r.storage.GetManifest(r.repository, reference)
+			if err == nil {
+				var identity Secret
+				identity, err = r.identity.read()
+				if err == nil {
+					var view *catalogView
+					view, err = openCatalog(r.storage, r.repository, manifest, digest, identity)
+					if err == nil {
+						if prior != nil {
+							for hash, node := range prior.nodes {
+								if _, reachable := view.reachable[hash]; reachable {
+									view.nodes[hash] = node
+								}
+							}
+						}
+						r.views[reference] = view
+					}
+				}
+			}
+		}
+		if err != nil {
+			platformsReady = false
+			if !errors.Is(err, ErrObjectNotFound) || prior != nil || len(references) == 1 {
+				failures = append(failures, err)
+			}
+		}
+	}
+	if len(r.views) == 0 && len(failures) == 0 {
+		failures = append(failures, ErrObjectNotFound)
+	}
+	if len(r.views) > 0 {
+		next := r.copySnapshot()
+		digests := []string{}
+		for _, reference := range references {
+			view := r.views[reference]
+			if view == nil {
+				continue
+			}
+			digests = append(digests, view.digest)
+			if view.legacy != nil {
+				if err := mergeConsumerRecords(next, view.legacy); err != nil {
+					failures = append(failures, err)
+				}
+			}
+		}
+		if len(digests) == 1 {
+			next.Digest = digests[0]
+		} else {
+			next.Digest = contentDigest([]byte(strings.Join(digests, "\n")))
+		}
+		r.setSnapshot(next)
+	}
+	if len(failures) > 0 {
+		r.refreshError = fmt.Errorf("cache catalog refresh failed: %w", errors.Join(failures...))
+		r.deadline, r.retryAfter = r.now().Add(5*time.Second), r.now().Add(5*time.Second)
+		if r.log != nil {
+			fmt.Fprintln(r.log, r.refreshError)
+		}
+	} else {
+		r.refreshError = nil
+		r.deadline, r.retryAfter = r.now().Add(30*time.Second), r.now().Add(5*time.Second)
+		if strings.HasPrefix(r.reference, "sha256:") {
+			r.deadline = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+			r.retryAfter = r.deadline
+		}
+	}
+}
+
+func (r *SnapshotReader) copySnapshot() *Snapshot {
+	next := NewSnapshot(r.storage, r.repository)
+	if r.snapshot != nil {
+		next.Digest = r.snapshot.Digest
+		next.Files, next.Narinfos = maps.Clone(r.snapshot.Files), maps.Clone(r.snapshot.Narinfos)
+	}
+	return next
+}
+
+func (r *SnapshotReader) setSnapshot(snapshot *Snapshot) {
+	r.stateMu.Lock()
+	r.snapshot = snapshot
+	r.stateMu.Unlock()
+}
+
+func mergeConsumerRecords(target, source *Snapshot) error {
+	for name, text := range source.Narinfos {
+		if old, exists := target.Narinfos[name]; exists {
+			if err := matchingNarinfos(old, text); err != nil {
+				return err
+			}
+		}
+	}
+	for name, file := range source.Files {
+		if consumerFile(name) {
+			if _, exists := target.Files[name]; !exists {
+				target.Files[name] = file
+			}
+		}
+	}
+	for name, text := range source.Narinfos {
+		if _, exists := target.Narinfos[name]; !exists {
+			target.Narinfos[name] = text
+		}
+	}
+	return nil
+}
+
+func (r *SnapshotReader) lookup(name string) error {
+	identity, err := r.identity.read()
+	if err != nil {
+		return err
+	}
+	next := r.copySnapshot()
+	var failures []error
+	for _, reference := range r.references() {
+		view := r.views[reference]
+		if view == nil {
+			continue
+		}
+		found, err := view.lookup(name, identity)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if err = mergeConsumerRecords(next, found); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if next.HasFile(name) {
+			break
+		}
+	}
+	r.setSnapshot(next)
+	return errors.Join(failures...)
 }
 
 var cachePathPattern = regexp.MustCompile(`^(?:nix-cache-info|[0-9abcdfghijklmnpqrsvwxyz]{32}\.narinfo|nar/[A-Za-z0-9._-]+\.nar(?:\.[A-Za-z0-9]+)?)$`)

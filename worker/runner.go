@@ -2,9 +2,6 @@ package worker
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +21,6 @@ import (
 	"time"
 )
 
-const MaxCheckpoints = 4
 const DiskReserve = 8 * 1024 * 1024 * 1024
 const DiskStop = 4 * 1024 * 1024 * 1024
 const publicationInterval = 30 * time.Second
@@ -104,38 +100,6 @@ func dedicatedRunner() bool {
 	return os.Getenv("GITHUB_ACTIONS") == "true" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted"
 }
 
-func LoadParent(storage Storage, repository string, identity Secret) (*Snapshot, error) {
-	manifest, digest, e := storage.GetManifest(repository, "nixos-cache-latest")
-	if errors.Is(e, ErrObjectNotFound) {
-		return NewSnapshot(storage, repository), nil
-	}
-	if e != nil {
-		return nil, e
-	}
-
-	return loadSnapshot(storage, repository, manifest, digest, identity)
-}
-
-func BuildParent(storage Storage, repository string, identity Secret, pinned string, admitted, attempt int) (*Snapshot, error) {
-	if admitted < 1 || admitted > attempt {
-		return nil, errors.New("missing or invalid admission attempt")
-	}
-	if admitted != attempt {
-		return LoadParent(storage, repository, identity)
-	}
-	if pinned != "" {
-		return LoadSnapshot(storage, repository, pinned, identity)
-	}
-
-	return NewSnapshot(storage, repository), nil
-}
-
-func StageTag(run, system string, attempt, sequence int, identity Secret) string {
-	mac := hmac.New(sha256.New, identity.Data)
-	fmt.Fprintf(mac, "checkpoint\x00%s:%s:%d:%d", run, system, attempt, sequence)
-	return fmt.Sprintf("nixos-cache-stage-%s-%d-%d-%s", run, attempt, sequence, hex.EncodeToString(mac.Sum(nil))[:32])
-}
-
 func BuildBinding(submitted BuildRequest, system string) map[string]any {
 	return map[string]any{
 		"request": submitted.ID,
@@ -143,37 +107,6 @@ func BuildBinding(submitted BuildRequest, system string) map[string]any {
 		"system":  system,
 		"policy":  Policy,
 	}
-}
-
-func PriorStage(storage Storage, repository, run, system string, attempt int, identity Secret, expected map[string]any) (*Snapshot, error) {
-	for previous := attempt; previous > 0; previous-- {
-		refs := []string{ResultTag(run, system, previous)}
-		for seq := MaxCheckpoints; seq > 0; seq-- {
-			refs = append(refs, StageTag(run, system, previous, seq, identity))
-		}
-
-		for _, ref := range refs {
-			manifest, digest, e := storage.GetManifest(repository, ref)
-			if errors.Is(e, ErrObjectNotFound) {
-				continue
-			}
-			if e != nil {
-				return nil, e
-			}
-
-			stage, e := loadSnapshot(storage, repository, manifest, digest, identity)
-			if e != nil {
-				return nil, e
-			}
-			if !equivalent(stage.Metadata["binding"], expected) || stage.Metadata["kind"] != "stage" || String(stage.Metadata["run"]) != run || Int(stage.Metadata["attempt"]) != previous {
-				return nil, errors.New("checkpoint binding mismatch")
-			}
-
-			return stage, nil
-		}
-	}
-
-	return nil, nil
 }
 
 func CacheUnion(parent, delta *Snapshot) (*Snapshot, error) {
@@ -303,7 +236,7 @@ func (g *DiskGuard) Sample() error {
 
 		g.MinimumFree = min(g.MinimumFree, free)
 		if free < DiskStop {
-			return errors.New("runner disk safety reserve reached; build cancelled to preserve diagnostics and checkpoints")
+			return errors.New("runner disk safety reserve reached; build cancelled to preserve diagnostics and published outputs")
 		}
 	}
 
@@ -353,40 +286,16 @@ type nativeBuild struct {
 	log                 io.Writer
 	upstream            UpstreamCollector
 	pool                *BuildPool
+	live                *livePublisher
 }
 
 func (b *nativeBuild) publish(required map[string]bool) (int, error) {
-	return PublishStore(b.source, required, b.delta, b.parent, b.secrets.signingKey, b.secrets.recipients, b.log, b.upstream)
-}
-
-func (b *nativeBuild) checkpoint(sequence int) error {
-	if sequence > MaxCheckpoints {
-		return errors.New("checkpoint budget exhausted; more runner disk is required")
+	before := len(b.delta.Narinfos) + len(b.delta.Upstream)
+	count, err := PublishStore(b.source, required, b.delta, b.parent, b.secrets.signingKey, b.secrets.recipients, b.log, b.upstream)
+	if b.live != nil && ((b.live.published == 0 && len(b.delta.Narinfos)+len(b.delta.Upstream) > 0) || before != len(b.delta.Narinfos)+len(b.delta.Upstream)) {
+		err = errors.Join(err, b.live.publish(b.delta, false))
 	}
-	if _, err := CacheUnion(b.parent, b.delta); err != nil {
-		return err
-	}
-
-	tag := ResultTag(b.run, b.system, b.attempt)
-	if b.delta.Metadata["terminal"] != true {
-		tag = StageTag(b.run, b.system, b.attempt, sequence, b.secrets.identity)
-	}
-
-	fmt.Fprintf(b.log, "Checkpoint %d: publishing\n", sequence)
-	started := time.Now()
-	if _, err := b.delta.Publish(tag, b.secrets.recipients); err != nil {
-		return err
-	}
-	fmt.Fprintf(b.log, "Checkpoint %d: published (%.1fs)\n", sequence, time.Since(started).Seconds())
-	if b.delta.ManifestBytes >= 8*1024*1024 {
-		fmt.Fprintln(b.log, "warning: checkpoint manifest exceeds 8 MiB")
-	}
-	return nil
-}
-
-func snapshotState(s *Snapshot) string {
-	b, _ := json.Marshal([]any{s.Files, s.Narinfos, s.Upstream})
-	return string(b)
+	return count, err
 }
 
 type buildLog struct {
@@ -467,10 +376,26 @@ func (b nativeBuild) execute() (bool, error) {
 		b.upstream = upstream
 	}
 	started := time.Now()
-	b.log = &buildLog{Writer: b.log}
+	if _, ok := b.log.(*buildLog); !ok {
+		b.log = &buildLog{Writer: b.log}
+	}
 	source, system, parent, delta := b.source, b.system, b.parent, b.delta
 	signingKey, recipients, log := b.secrets.signingKey, b.secrets.recipients, b.log
 	upstream, pool := b.upstream, b.pool
+	if b.live == nil {
+		b.live = &livePublisher{system: system, run: b.run, attempt: b.attempt,
+			recipients: recipients, log: log}
+	}
+	b.live.log = log
+	// The publisher owns mutable cumulative state; the build and its substituter
+	// retain their independent views while uploads run in the background.
+	durable := NewSnapshot(parent.Storage, parent.Repository)
+	if err := durable.Merge(parent); err != nil {
+		return false, err
+	}
+	maps.Copy(durable.Files, parent.Files)
+	durable.Digest = parent.Digest
+	b.live.snapshot = durable
 	fmt.Fprintf(log, "Build capacity: 1 build, %d CPUs\n", runtime.NumCPU())
 
 	nix := func(args []string, capture bool, data []byte) ([]byte, error) {
@@ -507,7 +432,6 @@ func (b nativeBuild) execute() (bool, error) {
 		parent = parentIndex.selectPaths(graph.Required)
 		b.parent = parent
 	}
-	saved := snapshotState(delta)
 	unknown := []string{}
 	for p := range graph.Required {
 		if !parent.Contains(p) && !delta.Contains(p) {
@@ -562,8 +486,6 @@ func (b nativeBuild) execute() (bool, error) {
 		len(graph.Required),
 		len(missing),
 	)
-	sequence := 0
-	lastCheckpoint := time.Now()
 	initialFiles := map[string]bool{}
 	for n := range delta.Files {
 		initialFiles[n] = true
@@ -626,52 +548,32 @@ func (b nativeBuild) execute() (bool, error) {
 			publication = startCachePublisher(graph.Required, publicationInterval, publish)
 			return nil
 		}
-		checkpointIfNeeded := func() error {
+		reclaimIfNeeded := func() error {
 			free, err := diskFree("/nix/store")
 			if err != nil {
 				return err
 			}
 			minimumFree = min(minimumFree, free)
-			pressure := free < DiskReserve
-			timed := sequence < MaxCheckpoints-1 && time.Since(lastCheckpoint) >= 30*time.Minute
-			if !pressure && !timed {
+			if free >= DiskReserve {
 				return nil
 			}
-			if sequence >= MaxCheckpoints-1 {
-				return errors.New("disk reserve reached; checkpoint budget reserved for completion")
+			if err = waitPublication(); err != nil {
+				return err
 			}
-
-			// Pool results are already published; batches must drain the publisher.
-			if publication != nil {
-				if err := waitPublication(); err != nil {
-					return err
-				}
-				if err := publish(graph.Required); err != nil {
-					return err
-				}
+			if _, err = b.publish(graph.Required); err != nil {
+				return err
 			}
-			if state := snapshotState(delta); state != saved {
-				if err := b.checkpoint(sequence + 1); err != nil {
-					return err
-				}
-				sequence++
-				saved = state
-				lastCheckpoint = time.Now()
-			}
-
 			durable, err := CacheUnion(parent, delta)
 			if err != nil {
 				return err
 			}
 			handler.SetSnapshot(durable)
-			if pressure {
-				free, err = Reclaim(source, log, graph, durable, roots)
-				if err != nil {
-					return err
-				}
-				if free < DiskReserve {
-					return errors.New("pending build working set exceeds runner disk capacity")
-				}
+			free, err = Reclaim(source, log, graph, durable, roots)
+			if err != nil {
+				return err
+			}
+			if free < DiskReserve {
+				return errors.New("pending build working set exceeds runner disk capacity")
 			}
 			return nil
 		}
@@ -682,7 +584,7 @@ func (b nativeBuild) execute() (bool, error) {
 					if err := publish(graph.Required); err != nil {
 						return nil, err
 					}
-					if err := checkpointIfNeeded(); err != nil {
+					if err := reclaimIfNeeded(); err != nil {
 						return nil, err
 					}
 					return index, nil
@@ -724,7 +626,7 @@ func (b nativeBuild) execute() (bool, error) {
 			if e = graph.Resolve(nix); e != nil {
 				return e
 			}
-			if e = checkpointIfNeeded(); e != nil {
+			if e = reclaimIfNeeded(); e != nil {
 				return e
 			}
 		}
@@ -785,7 +687,6 @@ func (b nativeBuild) execute() (bool, error) {
 		"results":               results,
 		"required_hash":         graph.Hash(),
 		"seconds":               math.Round(time.Since(started).Seconds()*1000) / 1000,
-		"checkpoints":           sequence + 1,
 		"targets":               len(graph.Targets),
 		"required_paths":        len(graph.Required),
 		"missing_output_groups": len(missing),
@@ -795,7 +696,7 @@ func (b nativeBuild) execute() (bool, error) {
 		delta.Metadata[k] = v
 	}
 
-	if e = b.checkpoint(sequence + 1); e != nil {
+	if e = b.live.publish(delta, true); e != nil {
 		return false, e
 	}
 
@@ -806,102 +707,15 @@ func (b nativeBuild) execute() (bool, error) {
 	return complete, nil
 }
 
-func Assemble(storage Storage, repository string, submitted BuildRequest, run string, attempt int, identity Secret, jobs map[string]ActionJob, matrix BuildMatrix) (*Snapshot, *Snapshot, error) {
-	systems, e := matrix.Systems()
-	if e != nil {
-		return nil, nil, e
-	}
-	selection := submitted.Selection
-	if (selection == nil && len(systems) != len(Systems)) || (selection != nil && len(systems) != 1) {
-		return nil, nil, errors.New("admission matrix does not match the build selection")
-	}
-	parent, e := LoadParent(storage, repository, identity)
-	if e != nil {
-		return nil, nil, e
-	}
-
-	result := NewSnapshot(storage, repository)
-	if e = result.Merge(parent); e != nil {
-		return nil, nil, e
-	}
-
-	states := map[string]string{}
-	mergedParents := map[string]bool{parent.Digest: true}
-	success := true
-	for _, system := range systems {
-		job, found := jobs[system]
-		jobAttempt := attempt
-		if found {
-			jobAttempt = job.RunAttempt
-		}
-
-		if jobAttempt < 1 || jobAttempt > attempt {
-			return nil, nil, errors.New("invalid job attempt")
-		}
-
-		stage, e := PriorStage(storage, repository, run, system, jobAttempt, identity, BuildBinding(submitted, system))
-		if e != nil {
-			return nil, nil, e
-		}
-
-		states[system] = "failure"
-		if stage != nil {
-			if digest := String(stage.Metadata["parent"]); digest != "" && !mergedParents[digest] {
-				base, e := LoadSnapshot(storage, repository, digest, identity)
-				if e != nil {
-					return nil, nil, e
-				}
-
-				if e = result.Merge(base); e != nil {
-					return nil, nil, e
-				}
-				mergedParents[digest] = true
-			}
-
-			if e = result.Merge(stage); e != nil {
-				return nil, nil, e
-			}
-
-			if found && job.Status == "completed" && job.Conclusion == "success" && stage.Metadata["terminal"] == true && stage.Metadata["status"] == "success" && Int(stage.Metadata["attempt"]) == jobAttempt {
-				states[system] = "success"
-			}
-		}
-
-		success = success && states[system] == "success"
-	}
-
-	if e = result.PreferUpstream(); e != nil {
-		return nil, nil, e
-	}
-
-	if e = result.RequireClosed(); e != nil {
-		return nil, nil, e
-	}
-
-	status := "failure"
-	if success {
-		status = "success"
-	}
-
-	result.Metadata = map[string]any{
-		"kind":    "commit",
-		"run":     run,
-		"attempt": attempt,
-		"request": submitted.ID,
-		"status":  status,
-		"systems": states,
-	}
-	return parent, result, nil
-}
-
 func RunWorker(log io.Writer) error {
+	log = &buildLog{Writer: log}
 	request, sourceRevision := os.Getenv("INPUT_REQUEST"), os.Getenv("INPUT_SOURCE")
 	mode, system := os.Getenv("INPUT_MODE"), os.Getenv("INPUT_SYSTEM")
 	run := os.Getenv("GITHUB_RUN_ID")
 	attempt, e := strconv.Atoi(os.Getenv("GITHUB_RUN_ATTEMPT"))
-	validMode := mode == "admit" || mode == "build" || mode == "builder" || mode == "finalize"
+	validMode := mode == "admit" || mode == "build" || mode == "builder"
 	_, native := Systems[system]
-	if e != nil || attempt < 1 || !regexpRun.MatchString(run) || !validMode || ((mode == "build" || mode == "builder") && !native) {
+	if e != nil || attempt < 1 || !validRetentionRun(run) || !validMode || ((mode == "build" || mode == "builder") && !native) {
 		return errors.New("invalid worker inputs")
 	}
 
@@ -910,7 +724,9 @@ func RunWorker(log io.Writer) error {
 		return e
 	}
 
-	var config map[string]any
+	var config struct {
+		Repository string `json:"repository"`
+	}
 	if e = json.Unmarshal([]byte(takeEnv("CI_STORAGE")), &config); e != nil {
 		return e
 	}
@@ -924,12 +740,16 @@ func RunWorker(log io.Writer) error {
 	storage := NewRegistry(RegistryCredential(user, token))
 	defer storage.Close()
 
-	repository := String(config["repository"])
+	repository := config.Repository
+	if _, _, err := RepositoryParts(repository); err != nil {
+		return err
+	}
 	if os.Getenv("GITHUB_REPOSITORY") != strings.TrimPrefix(repository, "ghcr.io/") {
 		return errors.New("worker repository mismatch")
 	}
 
 	api := NewGitHub(token)
+	retirer := newVersionRetirer(api, storage, repository)
 	workerRecipients, e := IdentityRecipients(identity)
 	if e != nil {
 		return e
@@ -938,6 +758,11 @@ func RunWorker(log io.Writer) error {
 	source := os.Getenv("INPUT_SOURCE_PATH")
 	if source == "" {
 		return errors.New("missing source checkout path")
+	}
+	if mode == "build" {
+		if _, err := signingPublicKey(signingKey.Data); err != nil {
+			return err
+		}
 	}
 	var bus *poolBus
 	if mode == "build" || mode == "builder" {
@@ -973,15 +798,6 @@ func RunWorker(log io.Writer) error {
 			return e
 		}
 
-		parent, e := LoadParent(storage, repository, identity)
-		if e != nil {
-			return e
-		}
-
-		if e = parent.RequireClosed(); e != nil {
-			return e
-		}
-
 		f, e := os.OpenFile(os.Getenv("GITHUB_OUTPUT"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if e != nil {
 			return e
@@ -1004,7 +820,14 @@ func RunWorker(log io.Writer) error {
 		if e != nil || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(strings.TrimSpace(string(revision))) {
 			return errors.New("resolve admitted source commit")
 		}
-		_, e = fmt.Fprintf(f, "parent=%s\nattempt=%d\nmatrix=%s\nhelpers=%s\nrevision=%s\n", parent.Digest, attempt, encoded, helperJSON, strings.TrimSpace(string(revision)))
+		if e = migrateLegacy(storage, repository, run, attempt, identity, recipients, retirer, log); e != nil {
+			return e
+		}
+		if _, e = Prune(api, storage, repository, "", log); e != nil {
+			return e
+		}
+
+		_, e = fmt.Fprintf(f, "matrix=%s\nhelpers=%s\nrevision=%s\n", encoded, helperJSON, strings.TrimSpace(string(revision)))
 		if e != nil {
 			return e
 		}
@@ -1014,137 +837,33 @@ func RunWorker(log io.Writer) error {
 		return nil
 	}
 
-	if mode == "build" {
-		admitted, _ := strconv.Atoi(os.Getenv("INPUT_ADMISSION_ATTEMPT"))
-
-		parent, e := BuildParent(storage, repository, identity, os.Getenv("INPUT_PARENT"), admitted, attempt)
-		if e != nil {
-			return e
-		}
-
-		parentDigest := parent.Digest
-		if e = parent.RequireClosed(); e != nil {
-			return e
-		}
-
-		expected := BuildBinding(submitted, system)
-		prior, e := PriorStage(storage, repository, run, system, attempt-1, identity, expected)
-		if e != nil {
-			return e
-		}
-
-		if prior != nil {
-			if digest := String(prior.Metadata["parent"]); digest != "" {
-				base, e := LoadSnapshot(storage, repository, digest, identity)
-				if e != nil {
-					return e
-				}
-
-				if e = parent.Merge(base); e != nil {
-					return e
-				}
-			}
-
-			if e = parent.Merge(prior); e != nil {
-				return e
-			}
-
-			fmt.Fprintf(log, "Resuming checkpoint: %d cached paths, %d upstream paths\n", len(prior.Narinfos), len(prior.Upstream))
-		}
-
-		if e = parent.RequireClosed(); e != nil {
-			return e
-		}
-
-		delta := NewSnapshot(storage, repository)
-		var parentValue any
-		if parentDigest != "" {
-			parentValue = parentDigest
-		}
-
-		delta.Metadata = map[string]any{
-			"kind":    "stage",
-			"binding": expected,
-			"parent":  parentValue,
-			"run":     run,
-			"attempt": attempt,
-			"request": request,
-			"status":  "failure",
-		}
-		if submitted.Selection != nil {
-			delta.Metadata["selection"] = submitted.Selection
-		}
-
-		if prior != nil {
-			if e = delta.Merge(prior); e != nil {
-				return e
-			}
-
-			delta.Digest = prior.Digest
-		}
-
-		pool := StartBuildPool(bus, log)
-		defer pool.Close()
-		success, e := (nativeBuild{
-			source: source, system: system, run: run, attempt: attempt,
-			parent: parent, delta: delta, pool: pool, log: log,
-			secrets: buildSecrets{identity: identity, recipients: recipients, signingKey: signingKey},
-		}).execute()
-		if e != nil {
-			return e
-		}
-		if !success {
-			return errors.New("native build failed")
-		}
-
-		return nil
-	}
-
-	var matrix BuildMatrix
-	if e = json.Unmarshal([]byte(os.Getenv("INPUT_MATRIX")), &matrix); e != nil {
-		return errors.New("invalid admission matrix")
-	}
-	return Finalize(api, storage, repository, submitted, run, attempt, identity, recipients, matrix, log)
-}
-
-func Finalize(api GitHubAPI, storage Storage, repository string, submitted BuildRequest, run string, attempt int, identity, recipients Secret, matrix BuildMatrix, log io.Writer) error {
-	// Retention uses manifests, so failed job lookups or unreadable catalogs must
-	// not prevent cleanup. Keep current checkpoints and their parents for assembly.
-	if _, err := Prune(api, storage, repository, run, log); err != nil {
-		return err
-	}
-
-	jobs, e := ActionJobs(api, strings.TrimPrefix(repository, "ghcr.io/"), run, attempt)
+	parent, e := loadPlatform(storage, repository, system, identity)
 	if e != nil {
 		return e
 	}
-
-	parent, combined, e := Assemble(storage, repository, submitted, run, attempt, identity, jobs, matrix)
+	delta := NewSnapshot(storage, repository)
+	delta.Metadata = map[string]any{
+		"kind": "stage", "binding": BuildBinding(submitted, system),
+		"run": run, "attempt": attempt, "request": request, "status": "failure",
+	}
+	if submitted.Selection != nil {
+		delta.Metadata["selection"] = submitted.Selection
+	}
+	bus.retire = retirer.retire
+	pool := StartBuildPool(bus, log)
+	defer pool.Close()
+	success, e := (nativeBuild{
+		source: source, system: system, run: run, attempt: attempt,
+		parent: parent, delta: delta, pool: pool, log: log,
+		live: &livePublisher{snapshot: parent, system: system, run: run, attempt: attempt,
+			recipients: recipients, retire: retirer.retire, log: log},
+		secrets: buildSecrets{identity: identity, recipients: recipients, signingKey: signingKey},
+	}).execute()
 	if e != nil {
 		return e
 	}
-
-	for system, state := range combined.Metadata["systems"].(map[string]string) {
-		fmt.Fprintf(log, "%s: %s\n", system, state)
+	if !success {
+		return errors.New("native build failed")
 	}
-
-	if snapshotState(combined) != snapshotState(parent) {
-		if _, e = combined.Publish(fmt.Sprintf("nixos-cache-run-%s-%d", run, attempt), recipients); e != nil {
-			return e
-		}
-
-		if _, e = storage.PutManifest(repository, "nixos-cache-latest", combined.Manifest); e != nil {
-			return e
-		}
-
-		if combined.ManifestBytes >= 8*1024*1024 {
-			fmt.Fprintln(log, "warning: combined cache manifest exceeds 8 MiB")
-		}
-	}
-
-	if combined.Metadata["status"] != "success" {
-		return errors.New("one or more native builds failed")
-	}
-
 	return nil
 }

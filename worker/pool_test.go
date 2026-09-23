@@ -759,3 +759,22 @@ func TestSchedulerRetriesExpiredFinalAssignmentOnCoordinator(t *testing.T) {
 		t.Fatalf("unfinished helper task was not retried locally: %d/%d/%d", attempts[0].Load(), attempts[1].Load(), attempts[2].Load())
 	}
 }
+
+func TestSchedulerStopsAssignmentsWhenRetirementFails(t *testing.T) {
+	p := schedulerFixture(t)
+	graph := &Plan{Derivations: map[string]Derivation{}}
+	missing := []string{}
+	for i := range 30 {
+		drv := fmt.Sprint(i)
+		graph.Derivations[drv] = derivation(drv + "-out")
+		missing = append(missing, drv+"^out")
+	}
+	var started atomic.Int32
+	err := p.schedule(graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+		started.Add(1)
+		return fmt.Errorf("%w: retirement failed", errPoolPublication)
+	})
+	if !errors.Is(err, errPoolPublication) || started.Load() != RunnersPerSystem {
+		t.Fatal("retirement backlog admitted more work", started.Load(), err)
+	}
+}

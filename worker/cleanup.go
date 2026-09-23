@@ -17,8 +17,6 @@ import (
 	"time"
 )
 
-const KeepRuns = 3
-
 const retentionAnnotation = "com.awked.infra-ci.retention.v1"
 const retentionReaders = 8
 
@@ -28,12 +26,16 @@ type retentionRecord struct {
 	Kind   string `json:"kind"`
 	Run    string `json:"run"`
 	Parent string `json:"parent,omitempty"`
+	System string `json:"system,omitempty"`
 }
 
 func snapshotRetention(metadata map[string]any) retentionRecord {
 	record := retentionRecord{Kind: String(metadata["kind"]), Run: valueID(metadata["run"])}
 	if record.Kind == "stage" {
 		record.Parent = String(metadata["parent"])
+	}
+	if record.Kind == "live" {
+		record.System = String(metadata["system"])
 	}
 	return record
 }
@@ -44,7 +46,7 @@ func validRetentionRun(id string) bool {
 }
 
 func (r retentionRecord) validate() error {
-	if r.Kind != "commit" && r.Kind != "stage" && r.Kind != "pool" && r.Kind != "control" {
+	if r.Kind != "commit" && r.Kind != "stage" && r.Kind != "pool" && r.Kind != "control" && r.Kind != "live" {
 		return errors.New("invalid retention artifact kind")
 	}
 	if !validRetentionRun(r.Run) {
@@ -53,10 +55,17 @@ func (r retentionRecord) validate() error {
 	if r.Parent != "" && (r.Kind != "stage" || !digestPattern.MatchString(r.Parent)) {
 		return errors.New("invalid retention parent digest")
 	}
+	if r.Kind == "live" {
+		if _, ok := Systems[r.System]; !ok {
+			return errors.New("invalid retention platform")
+		}
+	} else if r.System != "" {
+		return errors.New("unexpected retention platform")
+	}
 	return nil
 }
 
-var runTagPattern = regexp.MustCompile(`^(?:nixos-cache-run-([0-9]+)-[1-9][0-9]*|nixos-cache-stage-([0-9]+)-[1-9][0-9]*-[1-4]-[a-f0-9]{32}|nixos-cache-result-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)|nixos-cache-pool-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:inputs-0|result-[1-2]))$`)
+var runTagPattern = regexp.MustCompile(`^(?:nixos-cache-run-([0-9]+)-[1-9][0-9]*|nixos-cache-stage-([0-9]+)-[1-9][0-9]*-[1-4]-[a-f0-9]{32}|nixos-cache-result-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)|nixos-cache-pool-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:inputs-[0-2]|result-[1-2]))$`)
 
 type GitHubAPI func(path, method string) (any, error)
 
@@ -342,7 +351,7 @@ func Inventory(api GitHubAPI, repository string) (string, []Version, error) {
 		return "", nil, err
 	}
 	if Fingerprint(versions) != Fingerprint(again) {
-		return "", nil, errors.New("package inventory changed; retry finalization")
+		return "", nil, errors.New("package inventory changed; retry retention")
 	}
 
 	return endpoint, versions, nil
@@ -439,7 +448,7 @@ type retentionPlan struct {
 	versions         []Version
 }
 
-func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun string, log io.Writer) (*retentionPlan, error) {
+func PlanCleanup(api GitHubAPI, storage Storage, repository, completedRun string, log io.Writer) (*retentionPlan, error) {
 	endpoint, versions, err := Inventory(api, repository)
 	if err != nil {
 		return nil, err
@@ -464,33 +473,10 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun strin
 
 	repo := strings.TrimPrefix(repository, "ghcr.io/")
 	workflow := "repos/" + repo + "/actions/workflows/build.yml/runs"
-	result, err := api(fmt.Sprintf("%s?per_page=%d", workflow, KeepRuns), "GET")
-	if err != nil {
-		return nil, err
+	if completedRun != "" && !validRetentionRun(completedRun) {
+		return nil, errors.New("cannot prune artifacts: invalid completed run ID")
 	}
-
-	mapping, err := objectMap(result)
-	if err != nil {
-		return nil, err
-	}
-
-	recent, err := objectList(mapping["workflow_runs"])
-	if err != nil {
-		return nil, err
-	}
-
-	if finalizingRun != "" && !validRetentionRun(finalizingRun) {
-		return nil, errors.New("cannot prune artifacts: invalid finalizing run ID")
-	}
-	retainedRuns := map[string]bool{}
 	activeRuns := map[string]bool{}
-	for _, run := range recent {
-		id := valueID(run["id"])
-		if !validRetentionRun(id) {
-			return nil, errors.New("cannot prune artifacts: a run has an invalid ID")
-		}
-		retainedRuns[id] = true
-	}
 	for _, state := range activeStates {
 		active, err := Pages(api, workflow+"?status="+state, "workflow_runs")
 		if err != nil {
@@ -501,14 +487,11 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun strin
 			if !validRetentionRun(id) {
 				return nil, errors.New("cannot prune artifacts: a run has an invalid ID")
 			}
-			retainedRuns[id], activeRuns[id] = true, true
+			activeRuns[id] = true
 		}
 	}
-	// Finalization starts after all builders finish, while Actions still reports
-	// its run as active. Checkpoints survive retries; pool records are not reused.
-	if finalizingRun != "" {
-		retainedRuns[finalizingRun] = true
-		delete(activeRuns, finalizingRun)
+	if completedRun != "" {
+		delete(activeRuns, completedRun)
 	}
 
 	inspected, err := inspectVersions(storage, repository, versions, log)
@@ -528,8 +511,16 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun strin
 		parents[version.Name] = record.Parent
 		run := record.Run
 		pool := record.Kind == "pool"
-		retain := version.Name == latest
+		// Legacy snapshots are migration inputs, including outputs from failed
+		// runs. Only the explicit migration path may retire them after all
+		// platform heads durably retain their payloads.
+		retain := version.Name == latest || record.Kind == "commit" || record.Kind == "stage"
 		for _, tag := range Tags(version) {
+			for system := range Systems {
+				if tag == PlatformTag(system) && (record.Kind != "live" || record.System != system) {
+					return nil, errors.New("platform tag and retention metadata disagree")
+				}
+			}
 			tagRun := TagRun(tag)
 			if tag != "nixos-cache-latest" && tagRun == "" {
 				retain = true
@@ -538,14 +529,15 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun strin
 				if !pool || tagRun != run {
 					return nil, errors.New("cannot prune pool records: tag and metadata disagree")
 				}
-			} else if retainedRuns[tagRun] {
+			} else if activeRuns[tagRun] {
 				retain = true
 			}
 		}
-		if pool {
+		// Untagged platform generations are cumulative and may be retired even
+		// while their publisher is active. Other active artifacts can still have
+		// readers holding immutable manifest digests.
+		if record.Kind != "live" {
 			retain = retain || activeRuns[run]
-		} else {
-			retain = retain || retainedRuns[run]
 		}
 		if retain {
 			protected[version.Name] = true
@@ -589,7 +581,7 @@ func PlanCleanup(api GitHubAPI, storage Storage, repository, finalizingRun strin
 	return &retentionPlan{endpoint: endpoint, latest: latest, versions: candidates}, nil
 }
 
-func Prune(api GitHubAPI, storage Storage, repository, finalizingRun string, log io.Writer) (deleted int, err error) {
+func Prune(api GitHubAPI, storage Storage, repository, completedRun string, log io.Writer) (deleted int, err error) {
 	started := time.Now()
 	phase := "planning cleanup"
 	defer func() {
@@ -605,7 +597,7 @@ func Prune(api GitHubAPI, storage Storage, repository, finalizingRun string, log
 		}
 		fmt.Fprintln(log)
 	}()
-	plan, err := PlanCleanup(api, storage, repository, finalizingRun, log)
+	plan, err := PlanCleanup(api, storage, repository, completedRun, log)
 	if err != nil {
 		return 0, err
 	}

@@ -92,7 +92,7 @@ func TestRetentionAnnotationsExcludePrivateMetadata(t *testing.T) {
 		"binding":   map[string]any{"source": "private-revision"},
 		"selection": map[string]string{"host": "private-host", "package": "private-package"},
 	}
-	cachePublish(t, snapshot, ResultTag("1", "aarch64-linux", 1), recipients)
+	cachePublish(t, snapshot, "nixos-cache-result-1-1-aarch64-linux", recipients)
 	for _, value := range snapshot.Manifest.Annotations {
 		if strings.Contains(value, "private-") {
 			t.Fatal("private metadata in manifest annotations")
@@ -127,7 +127,7 @@ func TestRetentionPreservesArchivesUsedByExistingNodeClients(t *testing.T) {
 	storage := newMemoryCache()
 	f := &retentionFixture{manifests: map[string]Manifest{}}
 	parent := NewSnapshot(storage, cacheTestRepository)
-	parent.Metadata = map[string]any{"kind": "commit", "run": "1"}
+	parent.Metadata = map[string]any{"kind": "pool", "run": "1"}
 	path := cacheRecord(parent, "a")
 	archive := "cache/nar/" + strings.Repeat("a", 64) + ".nar.zst"
 	if err := cacheAdd(parent, archive, strings.NewReader("cached archive"), recipients); err != nil {
@@ -218,7 +218,7 @@ func TestRetentionOverlapsChecksAndStopsOnEitherFailure(t *testing.T) {
 	for _, failure := range []string{"", "latest", "candidate"} {
 		t.Run(failure, func(t *testing.T) {
 			f := newRetentionFixture()
-			f.add(1, []string{}, map[string]any{"kind": "commit", "run": "1"})
+			f.add(1, []string{}, map[string]any{"kind": "pool", "run": "1"})
 			candidateRead := make(chan struct{})
 			storage := &recheckedRetentionStorage{Storage: retentionStorage{fixture: f}, check: func() error {
 				select {

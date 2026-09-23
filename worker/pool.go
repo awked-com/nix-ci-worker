@@ -88,6 +88,7 @@ type poolBus struct {
 	controlRecipients       Secret
 	storage                 Storage
 	control                 coordinationStore
+	retire                  func(...string) error
 	repository, run, system string
 	attempt                 int
 	identity, recipients    Secret

@@ -98,6 +98,7 @@ func TestNativeBuildContinuesDuringPublicationAndDrainsBeforeCompletion(t *testi
 				storage.failure = errors.New("publication interrupted")
 			}
 			parent, delta := NewSnapshot(storage, cacheTestRepository), NewSnapshot(storage, cacheTestRepository)
+			delta.Metadata = map[string]any{"kind": "stage", "run": "1", "attempt": 1, "binding": map[string]any{"system": system}}
 			log := &batchProgressLog{done: make(chan struct{})}
 			type result struct {
 				success bool
@@ -137,7 +138,10 @@ func TestNativeBuildContinuesDuringPublicationAndDrainsBeforeCompletion(t *testi
 			if r.err != nil || r.success == failed {
 				t.Fatalf("success=%v, error=%v\n%s", r.success, r.err, log.String())
 			}
-			saved := cacheLoad(t, storage, ResultTag("1", system, 1), identity)
+			saved, err := LoadResult(storage, cacheTestRepository, "1", system, 1, identity)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if saved.Metadata["terminal"] != true || (saved.Metadata["status"] == "success") == failed {
 				t.Fatal(saved.Metadata)
 			}
@@ -154,7 +158,7 @@ func TestNativeBuildContinuesDuringPublicationAndDrainsBeforeCompletion(t *testi
 	}
 }
 
-func TestNativeBuildCheckpointsSplitOutputsAndWarmResume(t *testing.T) {
+func TestNativeBuildPublishesSplitOutputsAndWarmResume(t *testing.T) {
 	nativeEnabled(t)
 	identity, recipients := cacheKeys(t)
 	system, e := NativeSystem()
@@ -210,7 +214,7 @@ func TestNativeBuildCheckpointsSplitOutputsAndWarmResume(t *testing.T) {
 			storage := newMemoryCache()
 			parent := NewSnapshot(storage, cacheTestRepository)
 			delta := NewSnapshot(storage, cacheTestRepository)
-			binding := map[string]any{"fixture": salt}
+			binding := map[string]any{"fixture": salt, "system": system}
 			delta.Metadata = map[string]any{
 				"kind":    "stage",
 				"binding": binding,
@@ -226,7 +230,7 @@ func TestNativeBuildCheckpointsSplitOutputsAndWarmResume(t *testing.T) {
 				t.Fatalf("build success=%v expected=%v error=%v\n%s", success, !failed, e, log.String())
 			}
 
-			saved, e := PriorStage(storage, cacheTestRepository, "1", system, 1, identity, binding)
+			saved, e := loadPlatform(storage, cacheTestRepository, system, identity)
 			if e != nil || saved == nil {
 				t.Fatal(saved, e)
 			}

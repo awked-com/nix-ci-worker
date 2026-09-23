@@ -15,9 +15,9 @@ import (
 type retentionFixture struct {
 	versions        []Version
 	manifests       map[string]Manifest
-	active, recent  []map[string]any
+	active          []map[string]any
 	latest          string
-	finalizingRun   string
+	completedRun    string
 	deleted         []int64
 	inventoryCalls  int
 	changeInventory bool
@@ -163,11 +163,11 @@ func (f *retentionFixture) api(path, method string) (any, error) {
 		}, nil
 	}
 
-	return map[string]any{"workflow_runs": f.recent}, nil
+	return nil, fmt.Errorf("unexpected GitHub request: %s", path)
 }
 
 func (f *retentionFixture) plan() ([]Version, error) {
-	plan, err := PlanCleanup(f.api, retentionStorage{fixture: f}, cacheTestRepository, f.finalizingRun, nil)
+	plan, err := PlanCleanup(f.api, retentionStorage{fixture: f}, cacheTestRepository, f.completedRun, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +192,7 @@ func TestRetentionKeepsActiveParentsAndManualPins(t *testing.T) {
 			f := newRetentionFixture()
 			parent := f.add(1, []string{"nixos-cache-run-1-1"}, map[string]any{"kind": "commit", "run": "1"})
 			f.add(2, []string{tag}, map[string]any{"kind": "stage", "run": "2", "parent": parent})
-			f.add(3, []string{"nixos-cache-result-3-1-aarch64-darwin"}, map[string]any{"kind": "stage", "run": "3"})
+			f.add(3, []string{"nixos-cache-result-3-1-aarch64-darwin"}, map[string]any{"kind": "pool", "run": "3"})
 			f.add(4, []string{"manual"}, map[string]any{"kind": "commit", "run": "4"})
 			f.active = []map[string]any{{"id": 2}}
 			candidates, err := f.plan()
@@ -205,9 +205,9 @@ func TestRetentionKeepsActiveParentsAndManualPins(t *testing.T) {
 
 func TestRetentionExpiresOldBuildArtifacts(t *testing.T) {
 	f := newRetentionFixture()
-	f.add(1, []string{"nixos-cache-run-1-1"}, map[string]any{"kind": "commit", "run": "1"})
-	f.add(2, []string{"nixos-cache-stage-2-1-1-" + strings.Repeat("a", 32)}, map[string]any{"kind": "stage", "run": "2"})
-	f.add(3, []string{}, map[string]any{"kind": "commit", "run": "3"})
+	f.add(1, []string{"nixos-cache-run-1-1"}, map[string]any{"kind": "pool", "run": "1"})
+	f.add(2, []string{"nixos-cache-stage-2-1-1-" + strings.Repeat("a", 32)}, map[string]any{"kind": "control", "run": "2"})
+	f.add(3, []string{}, map[string]any{"kind": "pool", "run": "3"})
 
 	candidates, err := f.plan()
 	if err != nil || !reflect.DeepEqual(versionIDs(candidates), []int64{1, 2, 3}) {
@@ -215,13 +215,13 @@ func TestRetentionExpiresOldBuildArtifacts(t *testing.T) {
 	}
 }
 
-func TestRetentionKeepsRecentBuilds(t *testing.T) {
+func TestRetentionKeepsLegacyMigrationInputs(t *testing.T) {
 	f := newRetentionFixture()
 	f.add(1, []string{"nixos-cache-run-1-1"}, map[string]any{"kind": "commit", "run": "1"})
 	f.add(3, []string{"nixos-cache-result-3-1-aarch64-linux"}, map[string]any{"kind": "stage", "run": "3"})
-	f.recent = []map[string]any{{"id": 1}}
+
 	candidates, err := f.plan()
-	if err != nil || !reflect.DeepEqual(versionIDs(candidates), []int64{3}) {
+	if err != nil || len(candidates) != 0 {
 		t.Fatal(versionIDs(candidates), err)
 	}
 }
@@ -277,7 +277,7 @@ func TestRetentionRejectsRepeatedAndChangingInventories(t *testing.T) {
 
 func TestPruneDeletesOnlyCompleteVerifiedPlan(t *testing.T) {
 	f := newRetentionFixture()
-	f.add(1, []string{"nixos-cache-run-1-1"}, map[string]any{"kind": "commit", "run": "1"})
+	f.add(1, []string{"nixos-cache-run-1-1"}, map[string]any{"kind": "pool", "run": "1"})
 	storage := retentionStorage{fixture: f}
 
 	deleted, err := Prune(f.api, storage, cacheTestRepository, "", io.Discard)
@@ -300,7 +300,7 @@ func TestPruneRechecksCacheVersionsBeforeDeletion(t *testing.T) {
 	for _, change := range []string{"latest", "pin", "digest", "updated"} {
 		t.Run(change, func(t *testing.T) {
 			f := newRetentionFixture()
-			f.add(1, []string{}, map[string]any{"kind": "commit", "run": "1"})
+			f.add(1, []string{}, map[string]any{"kind": "pool", "run": "1"})
 			changed := make(chan struct{})
 			storage := &recheckedRetentionStorage{Storage: retentionStorage{fixture: f}, check: func() error {
 				switch change {
@@ -356,6 +356,8 @@ func TestCleanupTagRecognition(t *testing.T) {
 		"nixos-cache-stage-15-2-4-" + strings.Repeat("a", 32): "15",
 		"nixos-cache-result-7-1-aarch64-linux":                "7",
 		"nixos-cache-pool-12-1-aarch64-darwin-inputs-0":       "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-inputs-1":       "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-inputs-2":       "12",
 		"nixos-cache-pool-12-1-aarch64-darwin-result-2":       "12",
 		"nixos-cache-pool-12-1-aarch64-darwin-result-3":       "",
 		"manual": "",
@@ -370,7 +372,6 @@ func TestCleanupTagRecognition(t *testing.T) {
 func TestRetentionKeepsActivePoolRecordsAndExpiresCompletedRecentRuns(t *testing.T) {
 	f := newRetentionFixture()
 	f.active = []map[string]any{{"id": "100"}}
-	f.recent = []map[string]any{{"id": "100"}, {"id": "99"}}
 	f.add(101, []string{"nixos-cache-pool-100-1-aarch64-darwin-result-1"}, map[string]any{"kind": "pool", "run": "100"})
 	f.add(102, []string{}, map[string]any{"kind": "pool", "run": "100"})
 	f.add(103, []string{"nixos-cache-pool-99-1-aarch64-darwin-inputs-0"}, map[string]any{"kind": "pool", "run": "99"})
@@ -381,11 +382,10 @@ func TestRetentionKeepsActivePoolRecordsAndExpiresCompletedRecentRuns(t *testing
 	}
 }
 
-func TestRetentionDrainsFinalizingPoolAndKeepsOtherActiveRuns(t *testing.T) {
+func TestRetentionDrainsCompletedPoolAndKeepsOtherActiveRuns(t *testing.T) {
 	f := newRetentionFixture()
-	f.finalizingRun = "11"
+	f.completedRun = "11"
 	f.active = []map[string]any{{"id": "11"}, {"id": "12"}}
-	f.recent = []map[string]any{{"id": "11"}, {"id": "12"}, {"id": "13"}}
 	id := int64(200)
 	want := []int64{}
 	for _, run := range []string{"11", "12", "13"} {
@@ -410,7 +410,7 @@ func TestRetentionDrainsFinalizingPoolAndKeepsOtherActiveRuns(t *testing.T) {
 	}
 	// Pins and recovery results survive even when their pool no longer exists.
 	f.add(500, []string{"manual", "nixos-cache-pool-13-1-aarch64-linux-result-2"}, map[string]any{"kind": "pool", "run": "13"})
-	f.add(501, []string{ResultTag("11", "aarch64-linux", 1)}, map[string]any{"kind": "stage", "run": "11"})
+	f.add(501, []string{"nixos-cache-result-11-1-aarch64-linux"}, map[string]any{"kind": "stage", "run": "11"})
 	f.add(502, []string{}, map[string]any{"kind": "stage", "run": "13"})
 	candidates, err := f.plan()
 	if err != nil || !reflect.DeepEqual(versionIDs(candidates), want) {
@@ -418,9 +418,8 @@ func TestRetentionDrainsFinalizingPoolAndKeepsOtherActiveRuns(t *testing.T) {
 	}
 }
 
-func TestRetentionProtectsParentsOfUntaggedRecentCheckpoints(t *testing.T) {
+func TestRetentionProtectsParentsOfLegacyMigrationInputs(t *testing.T) {
 	f := newRetentionFixture()
-	f.recent = []map[string]any{{"id": "3"}}
 	parent := f.add(1, []string{}, map[string]any{"kind": "commit", "run": "1"})
 	checkpoint := f.add(2, []string{}, map[string]any{"kind": "stage", "run": "2", "parent": parent})
 	f.add(3, []string{}, map[string]any{"kind": "stage", "run": "3", "parent": checkpoint})

@@ -80,9 +80,8 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 			t.Fatal(err)
 		}
 		private.Upstream[input] = []string{}
-		if err := private.PreferUpstream(); err != nil {
-			t.Fatal(err)
-		}
+		delete(private.Narinfos, NarinfoKey(input))
+		delete(private.Files, archive)
 		if err := private.RequireClosed(); err != nil {
 			t.Fatal(err)
 		}
@@ -173,7 +172,7 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 	}
 }
 
-func TestNativePoolBuildsAndFinalizesDependencyGraph(t *testing.T) {
+func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 	nativeEnabled(t)
 	t.Setenv("GITHUB_ACTIONS", "")
 	system, err := NativeSystem()
@@ -194,6 +193,9 @@ func TestNativePoolBuildsAndFinalizesDependencyGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	versions := &registryVersions{storage: storage}
+	retirer := newVersionRetirer(versions.api, storage, bus.repository)
+	bus.retire = retirer.retire
 	timing := poolTiming{20 * time.Millisecond, 50 * time.Millisecond, 10 * time.Second, 10 * time.Second}
 	var output bytes.Buffer
 	log := &buildLog{Writer: &output}
@@ -222,10 +224,12 @@ func TestNativePoolBuildsAndFinalizesDependencyGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	parent, delta := NewSnapshot(storage, bus.repository), NewSnapshot(storage, bus.repository)
+	delta.Metadata = map[string]any{"kind": "stage", "run": bus.run, "attempt": bus.attempt, "binding": map[string]any{"system": system}}
 	success, err := (nativeBuild{
 		source: source, system: system, run: bus.run, attempt: bus.attempt,
 		parent: parent, delta: delta, log: log, upstream: knownUpstream{}, pool: p,
 		secrets: buildSecrets{identity: identity, recipients: recipients, signingKey: Secret{Data: signing}},
+		live:    &livePublisher{system: system, run: bus.run, attempt: bus.attempt, recipients: recipients, retire: retirer.retire, log: log},
 	}).execute()
 	if err != nil || !success {
 		t.Fatalf("pool build: success=%v err=%v\n%s", success, err, &output)
@@ -246,15 +250,22 @@ func TestNativePoolBuildsAndFinalizesDependencyGraph(t *testing.T) {
 			t.Fatal("helper did not build", runner, status, err)
 		}
 	}
-	saved, err := LoadSnapshot(storage, bus.repository, ResultTag(bus.run, system, bus.attempt), identity)
+	saved, err := LoadResult(storage, bus.repository, bus.run, system, bus.attempt, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if saved.Metadata["status"] != "success" || saved.Metadata["terminal"] != true {
 		t.Fatal(saved.Metadata)
 	}
-	if err = saved.RequireClosed(); err != nil {
+	head, err := LoadSnapshot(storage, bus.repository, PlatformTag(system), identity)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err = head.RequireClosed(); err != nil {
+		t.Fatal(err)
+	}
+	if len(storage.manifests) != 1 || len(storage.tags) != 1 {
+		t.Fatal("completed helper artifacts survived durable publication", len(storage.manifests), storage.tags)
 	}
 }
 

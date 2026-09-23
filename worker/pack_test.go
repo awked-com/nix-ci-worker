@@ -88,8 +88,17 @@ func TestPackedArchivesRoundTripAndRetainSharedBlobs(t *testing.T) {
 	}
 	cachePublish(t, child, "retained", recipients)
 	retained := cacheLoad(t, storage, "retained", identity)
-	if len(retained.Manifest.Layers) != 2 || !bytes.Equal(cacheRead(t, retained, keep, identity), payloads[keep]) {
+	if !bytes.Equal(cacheRead(t, retained, keep, identity), payloads[keep]) {
 		t.Fatal("surviving archive lost its shared pack")
+	}
+	anchored := 0
+	for _, layer := range retained.Manifest.Layers {
+		if layer.Digest == retained.Files[keep].Blob.Digest {
+			anchored++
+		}
+	}
+	if anchored != 1 {
+		t.Fatalf("shared pack anchored %d times", anchored)
 	}
 	if retained.Files[keep].Blob.Digest != loaded.Files[keep].Blob.Digest {
 		t.Fatal("retention repacked existing ciphertext")

@@ -47,12 +47,6 @@ func TestEvaluationPlansReplaceOnlyTheirPlatform(t *testing.T) {
 	if len(parent.Files) != len(Systems) || parent.Files[evaluationFile("x86_64-linux")].Digest == old.Digest || parent.Files[evaluationFile("aarch64-linux")].Digest != other.Digest {
 		t.Fatal("plan replacement changed another platform or accumulated plans")
 	}
-	if err := parent.PreferUpstream(); err != nil {
-		t.Fatal(err)
-	}
-	if len(parent.Files) != len(Systems) {
-		t.Fatal("cache assembly discarded evaluation plans")
-	}
 }
 
 func TestEvaluationCacheRejectsCorruptionAndMissesChangedKeys(t *testing.T) {
@@ -110,6 +104,7 @@ func TestNativeEvaluationCacheRestoresAnEmptyStore(t *testing.T) {
 	identity, recipients := cacheKeys(t)
 	storage := newMemoryCache()
 	parent, delta := NewSnapshot(storage, cacheTestRepository), NewSnapshot(storage, cacheTestRepository)
+	delta.Metadata = map[string]any{"kind": "stage", "run": "90", "attempt": 1, "binding": map[string]any{"system": system}}
 	signing, err := exec.Command("nix", "--extra-experimental-features", "nix-command", "key", "generate-secret", "--key-name", "evaluation-fixture").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +132,7 @@ func TestNativeEvaluationCacheRestoresAnEmptyStore(t *testing.T) {
 	t.Setenv("NIX_REMOTE", "local?root="+store)
 	log.Reset()
 	next := NewSnapshot(storage, cacheTestRepository)
+	next.Metadata = map[string]any{"kind": "stage", "run": "91", "attempt": 1, "binding": map[string]any{"system": system}}
 	success, err = (nativeBuild{
 		source: source, system: system, run: "91", attempt: 1,
 		parent: parent, delta: next, log: &log, upstream: knownUpstream{},

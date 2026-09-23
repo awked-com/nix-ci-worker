@@ -337,14 +337,14 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 	// Publishing is serialized, while the scheduler keeps assigning independent
 	// tasks to other free runners. A runner is free only after its output is durable.
 	var publication sync.Mutex
-	execute := func(ctx context.Context, runner int, spec string, remote poolMessage) (*Snapshot, error) {
+	execute := func(ctx context.Context, runner int, spec string, remote poolMessage) (*Snapshot, string, error) {
 		drv := strings.SplitN(spec, "^", 2)[0]
 		buildInputs, err := graph.BuildInputs(drv)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if runner == 0 {
-			return nil, buildPoolDerivation(ctx, source, system, spec, remote.Cores, buildInputs, options, log)
+			return nil, "", buildPoolDerivation(ctx, source, system, spec, remote.Cores, buildInputs, options, log)
 		}
 		paths := []string{}
 		for _, path := range graph.Outputs[drv] {
@@ -353,27 +353,27 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 		required, _ := graph.TargetPaths(drv)
 		input := inputs.Load().selectPaths(required)
 		input.Metadata = map[string]any{"kind": "pool", "run": p.bus.run}
-		digest, err := input.Publish(p.bus.tag("inputs", 0), recipients)
+		digest, err := input.Publish(p.bus.tag("inputs", runner), recipients)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %w", errPoolPublication, err)
+			return nil, "", fmt.Errorf("%w: %w", errPoolPublication, err)
 		}
 		task := poolTask{Cores: remote.Cores, Installable: spec, BuildInputs: buildInputs, Inputs: digest, PublicKey: public, Outputs: paths}
 		result, err := p.remoteTask(ctx, runner, remote, task)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		transportKey := p.bus.signingKey(runner)
 		transportPublic, err := signingPublicKey(transportKey.Data)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if err = poolCopy(ctx, source, result, p.bus.identity, public+" "+transportPublic, paths, log); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return result, nil
+		return result, digest, nil
 	}
 	return p.schedule(graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
-		result, buildError := execute(ctx, runner, spec, remote)
+		result, inputDigest, buildError := execute(ctx, runner, spec, remote)
 		waiting := time.Now()
 		publication.Lock()
 		defer publication.Unlock()
@@ -392,6 +392,14 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 		}
 		if err := refresh(); err != nil {
 			return fmt.Errorf("%w: %w", errPoolPublication, err)
+		}
+		// A completed helper no longer reads its inputs. Its result can be
+		// removed only after refresh has signed and durably published the output
+		// into the cumulative platform cache. Failure stops new assignments.
+		if result != nil && p.bus.retire != nil {
+			if err := p.bus.retire(inputDigest, result.Digest); err != nil {
+				return fmt.Errorf("%w: %w", errPoolPublication, err)
+			}
 		}
 		fmt.Fprintf(log, "Build result processed: %s/%d (%.1fs; waited %.1fs)\n", system, runner, time.Since(started).Seconds(), started.Sub(waiting).Seconds())
 		return buildError

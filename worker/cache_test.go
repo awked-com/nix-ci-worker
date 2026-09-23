@@ -219,7 +219,7 @@ func TestSnapshotEncryptedCatalog(t *testing.T) {
 
 	cachePublish(t, snapshot, "nixos-cache-latest", recipients)
 	loaded := cacheLoad(t, storage, "nixos-cache-latest", identity)
-	if len(loaded.Manifest.Layers) != 2 || !reflect.DeepEqual(loaded.Narinfos, snapshot.Narinfos) || !reflect.DeepEqual(loaded.Metadata, snapshot.Metadata) {
+	if !reflect.DeepEqual(loaded.Narinfos, snapshot.Narinfos) || !reflect.DeepEqual(loaded.Metadata, snapshot.Metadata) {
 		t.Fatal("snapshot content changed")
 	}
 	for _, layer := range loaded.Manifest.Layers {
@@ -285,6 +285,12 @@ func TestSnapshotRequiresOneFilesCatalog(t *testing.T) {
 	storage := newMemoryCache()
 	snapshot := NewSnapshot(storage, cacheTestRepository)
 	cachePublish(t, snapshot, "latest", recipients)
+	var catalog Descriptor
+	for _, layer := range snapshot.Manifest.Layers {
+		if layer.Annotations[CatalogTitle] == "files" {
+			catalog = layer
+		}
+	}
 	for _, titles := range [][]string{
 		{},
 		{"unknown"},
@@ -294,7 +300,7 @@ func TestSnapshotRequiresOneFilesCatalog(t *testing.T) {
 			manifest := snapshot.Manifest
 			manifest.Layers = nil
 			for _, title := range titles {
-				layer := snapshot.Manifest.Layers[0]
+				layer := catalog
 				layer.Annotations = map[string]string{CatalogTitle: title}
 				manifest.Layers = append(manifest.Layers, layer)
 			}
@@ -330,13 +336,6 @@ func TestSnapshotClosureAndMergeValidation(t *testing.T) {
 
 	snapshot.Upstream[a] = []string{b}
 	snapshot.Upstream[b] = []string{}
-	if err := snapshot.PreferUpstream(); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(snapshot.Files) != 0 || len(snapshot.Narinfos) != 0 || !snapshot.Contains(a) {
-		t.Fatal("upstream did not replace private archives")
-	}
 
 	if err := snapshot.RequireClosed(); err != nil {
 		t.Fatal(err)
@@ -580,6 +579,11 @@ func (s slowManifestStorage) GetManifest(repo, ref string) (Manifest, string, er
 
 	<-s.release
 	return s.Storage.GetManifest(repo, ref)
+}
+
+func (s slowManifestStorage) ManifestDigest(repo, ref string) (string, error) {
+	_, digest, err := s.GetManifest(repo, ref)
+	return digest, err
 }
 
 func TestSlowRefreshServesExistingPaths(t *testing.T) {

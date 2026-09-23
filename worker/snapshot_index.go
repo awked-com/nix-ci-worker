@@ -84,10 +84,8 @@ func (i *snapshotIndex) extend(delta *Snapshot) (*Snapshot, error) {
 			if err != nil {
 				return nil, err
 			}
-			for _, key := range []string{"StorePath", "NarHash", "NarSize", "References", "URL"} {
-				if previous[key] != fields[key] {
-					return nil, errors.New("conflicting cache record")
-				}
+			if err := matchingNarinfoFields(previous, fields); err != nil {
+				return nil, err
 			}
 			continue
 		}
