@@ -4,44 +4,56 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/awked-com/nix-ci-worker/internal/ui"
 	"github.com/awked-com/nix-ci-worker/worker"
 )
 
 func main() {
-	syscall.Umask(0077)
-	var err error
-	switch {
-	case len(os.Args) == 1:
-		err = worker.RunWorker(os.Stdout)
-	case len(os.Args) > 1 && os.Args[1] == "cache":
-		err = cacheMain(os.Args[2:])
-	default:
-		err = errors.New("usage: nix-ci-worker [cache --config FILE --identity FILE --port PORT]")
+	err := run(os.Args[1:])
+	// Operational failures can contain private build details or credentials.
+	if err != nil && !errors.Is(err, flag.ErrHelp) && !ui.IsUsage(err) {
+		err = errors.New("CI worker failed.")
 	}
+	os.Exit(ui.Report(err, 1))
+}
 
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "CI worker failed.")
-		os.Exit(1)
+func run(args []string) error {
+	command := ui.New("nix-ci-worker", "Run the Actions worker protocol or serve an encrypted cache", "nix-ci-worker\n  nix-ci-worker cache --config FILE --identity FILE --port PORT", "  nix-ci-worker cache --config cache.json --identity /path/to/age-key --port 8080")
+	if ui.IsHelp(args) {
+		return command.Help(os.Stdout)
 	}
+	if len(args) > 0 && args[0] == "help" && len(args) == 2 && args[1] == "cache" {
+		return cacheMain([]string{"--help"})
+	}
+	if len(args) > 0 && args[0] != "cache" {
+		return command.Invalid("unknown command; expected cache or no arguments for the Actions protocol")
+	}
+	if len(args) == 0 {
+		syscall.Umask(0077)
+		return worker.RunWorker(os.Stdout)
+	}
+	return cacheMain(args[1:])
 }
 
 func cacheMain(args []string) error {
-	flags := flag.NewFlagSet("nix-ci-worker cache", flag.ContinueOnError)
+	command := ui.New("nix-ci-worker cache", "Serve an encrypted cache on IPv4 loopback until interrupted", "nix-ci-worker cache --config FILE --identity FILE --port PORT", "  nix-ci-worker cache --config cache.json --identity /path/to/age-key --port 8080")
+	flags := command.Flags
+
 	configPath := flags.String("config", "", "JSON configuration file")
 	identity := flags.String("identity", "", "age identity file")
 	port := flags.Int("port", 0, "IPv4 loopback port")
-	if e := flags.Parse(args); e != nil {
+	if e := command.Parse(args); e != nil {
 		return e
 	}
 
 	if *configPath == "" || *identity == "" || *port < 1 || *port > 65535 || flags.NArg() != 0 {
-		return errors.New("cache requires --config FILE --identity FILE --port PORT")
+		return command.Invalid("cache requires --config FILE --identity FILE and --port between 1 and 65535")
 	}
+	syscall.Umask(0077)
 
 	data, e := os.ReadFile(*configPath)
 	if e != nil {

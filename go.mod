@@ -5,6 +5,7 @@ go 1.25.8
 require (
 	filippo.io/age v1.3.2
 	github.com/klauspost/compress v1.20.0
+	golang.org/x/term v0.45.0
 )
 
 require (

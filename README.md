@@ -1,5 +1,9 @@
 # Nix CI worker
 
+Run a command with `--help` for usage and examples. Human-facing output uses
+color on terminals; `NO_COLOR=1`, `CLICOLOR=0`, or `TERM=dumb` disables it.
+Redirected output stays plain, and data streams keep their original format.
+
 ## Build and test
 
 Use Go 1.25.8 or newer:
