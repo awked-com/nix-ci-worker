@@ -9,7 +9,6 @@ import (
 	"maps"
 )
 
-// PlatformTag names the cumulative cache owned by one platform coordinator.
 func PlatformTag(system string) string { return "nixos-cache-" + system }
 
 // Live generations remain identifiable if GitHub refuses their deletion.

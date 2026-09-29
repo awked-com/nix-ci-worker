@@ -153,7 +153,6 @@ func (s *Snapshot) publishCatalog(recipients Secret, layers map[string]Descripto
 		record.References = &refs
 		writer[path] = record
 	}
-	// Validate and partition both trees before uploading any new catalog blobs.
 	consumerPlan, err := partitionCatalog(records, 0, catalogNodeLimit)
 	if err != nil {
 		return Descriptor{}, err
@@ -277,7 +276,6 @@ func parallelCatalog(count int, work func(int) error) error {
 }
 
 func readCatalogBlob(storage Storage, repository string, descriptor Descriptor, identity Secret, limit int) ([]byte, error) {
-	// Also bound ciphertext size before any decompression or allocation.
 	if descriptor.Size <= 0 || descriptor.Size > int64(limit)+1024*1024 {
 		return nil, errors.New("catalog ciphertext exceeds limit")
 	}

@@ -44,11 +44,8 @@ The identity file is an age identity, reloaded for catalog and NAR decryption.
 This command reads registry objects anonymously, so the package must allow
 anonymous reads; payloads remain encrypted. SIGINT or SIGTERM stops the server.
 
-The default `nixos-cache-latest` reference reads every supported platform.
-
 ## Run builds
 
-Without arguments the executable runs the GitHub Actions worker protocol.
 Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
 source flake. Select host system derivations and required checks there; their
 transitive dependencies determine which packages need building on each platform.
@@ -74,35 +71,32 @@ The workflow supplies these environment variables:
 | `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` | Actions run identity |
 | `GITHUB_OUTPUT` | Actions output file used by admission |
 
-The storage owner/package must match `GITHUB_REPOSITORY`. Admission emits the
-coordinator matrix, helper matrix, and resolved source revision. Retry jobs with
-those admitted inputs. The workflow must serialize builds for the cache package;
-each coordinator loads and updates its platform's cumulative cache head. Outputs
-become available during builds.
+The storage owner/package must match `GITHUB_REPOSITORY`. Retry jobs with the
+admitted matrices and source revision. The workflow must serialize builds for
+the cache package; each coordinator loads and updates its platform's cumulative
+cache head. Outputs become available during builds.
 
 Each platform head retains all previously cached outputs. Publication tags the
 new generation before advancing the head, then retires the superseded manifest.
 Helper artifacts are retired after their outputs have been verified, signed, and
 published. Admission cleans up artifacts left by interrupted runs.
 
-Versions explicitly protected by GitHub's public-package download limit are kept,
-including their historical tags, without blocking publication or assignments.
-Cleanup continues with other versions and retries retained versions on later runs.
-Other cleanup failures still stop new publication or assignments until a retry
-succeeds. Protected versions and their referenced blobs can accumulate. Older
-versions published before historical tagging may remain untagged.
+Versions explicitly protected by GitHub's public-package download limit are
+kept, including their historical tags, without blocking publication or
+assignments. Cleanup continues with other versions and retries retained versions
+on later runs. Other cleanup failures still stop new publication or assignments
+until a retry succeeds. Protected versions and their referenced blobs can
+accumulate.
 
-Cleanup validates ownership and retention metadata and rechecks candidates before
-deletion. Historical generation tags are checked against retention metadata;
-manual tags and unmarked artifacts are outside managed cleanup. Catalog pieces
-are blobs rather than package versions. Retaining every output still
-increases total storage as new unique archives are built.
+Cleanup validates ownership and retention metadata and rechecks candidates
+before deletion. Historical generation tags are checked against retention
+metadata; manual tags and unmarked artifacts are outside managed cleanup.
+Catalog pieces are blobs rather than package versions.
 
-Coordinators and helpers exchange small encrypted, authenticated messages through
-GitHub Actions cache v2. The workflow must launch the worker from a JavaScript
-action so it inherits GitHub's short-lived runtime credentials; ordinary shell
-steps do not receive them automatically. Admission does not use the coordination
-service.
+Coordinators and helpers exchange small encrypted, authenticated messages
+through GitHub Actions cache v2. The workflow must launch the worker from a
+JavaScript action so it inherits GitHub's short-lived runtime credentials;
+ordinary shell steps do not receive them automatically.
 
 Coordination messages are bound to the request, source revision, run, attempt,
 platform, and runner. Missing or expired messages return work to the coordinator.

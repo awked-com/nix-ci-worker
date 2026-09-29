@@ -107,7 +107,6 @@ func (c *packDownloads) read(repository string, file SnapshotFile, fetch func(Sn
 		stream, err := fetch(wholeFile(file.Blob))
 		var data []byte
 		if err == nil {
-			// Allocate exactly the reservation instead of growing a read buffer.
 			data = make([]byte, file.Blob.Size)
 			_, err = io.ReadFull(stream, data)
 			if err == nil {

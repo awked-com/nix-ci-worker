@@ -86,7 +86,6 @@ func (c *Command) Invalid(message string) error {
 	return &usageError{fmt.Errorf("%s\nRun `%s --help` for usage", strings.TrimSpace(message), c.Name)}
 }
 
-// Report preserves protocol and child failure codes supplied by the caller.
 func Report(err error, code int) int {
 	if err == nil || errors.Is(err, flag.ErrHelp) {
 		return 0

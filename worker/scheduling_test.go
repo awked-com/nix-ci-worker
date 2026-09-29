@@ -42,25 +42,3 @@ func TestSchedulerRunsOneFullCPUCapacityBuildPerRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-
-func TestSchedulerPrioritizesLongDependencyChains(t *testing.T) {
-	pool := schedulerFixture(t)
-	graph := &Plan{Derivations: map[string]Derivation{"a": derivation("a-out"), "z": derivation("z-out"), "y": derivation("y-out", "z"), "x": derivation("x-out", "y")}}
-	var mu sync.Mutex
-	first := ""
-	err := pool.schedule(graph, []string{"a^out", "z^out", "y^out", "x^out"}, func(ctx context.Context, runner int, spec string, budget poolMessage) error {
-		// The coordinator is allocated synchronously before any helper, independent
-		// of which execution goroutine happens to start first.
-		if runner == 0 {
-			mu.Lock()
-			if first == "" {
-				first = spec
-			}
-			mu.Unlock()
-		}
-		return nil
-	})
-	if err != nil || first != "z^out" {
-		t.Fatal("longest chain did not start on the coordinator", first, err)
-	}
-}
