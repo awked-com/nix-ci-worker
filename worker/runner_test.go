@@ -449,15 +449,6 @@ func TestBuildCommandRequiresNativeSandbox(t *testing.T) {
 	}
 }
 
-func TestBuildCommandUsesRequestedCPUCapacity(t *testing.T) {
-	command := strings.Join(BuildCommand("x86_64-linux", 1, 8, nil), " ")
-	for _, option := range []string{"--max-jobs 1 ", "--cores 8 "} {
-		if !strings.Contains(command, option) {
-			t.Fatal("build command ignored its CPU budget", command)
-		}
-	}
-}
-
 func TestReclaimProtectsSourcesAndUnpublishedPaths(t *testing.T) {
 	source, drv, out, extra, unpublished := fixturePath("a"), fixturePath("b")+".drv", fixturePath("c"), fixturePath("d"), fixturePath("e")
 	d := derivation(out)

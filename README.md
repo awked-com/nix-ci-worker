@@ -1,8 +1,6 @@
 # Nix CI worker
 
-Run a command with `--help` for usage and examples. Human-facing output uses
-color on terminals; `NO_COLOR=1`, `CLICOLOR=0`, or `TERM=dumb` disables it.
-Redirected output stays plain, and data streams keep their original format.
+Run a command with `--help` for usage. Set `NO_COLOR=1` to disable terminal colors.
 
 ## Build and test
 
@@ -46,9 +44,7 @@ The identity file is an age identity, reloaded for catalog and NAR decryption.
 This command reads registry objects anonymously, so the package must allow
 anonymous reads; payloads remain encrypted. SIGINT or SIGTERM stops the server.
 
-Cache readers check small platform indexes and fetch encrypted catalog pieces on
-demand. Build plans and run results are stored separately from the consumer
-catalog. The default `nixos-cache-latest` reference reads every supported platform.
+The default `nixos-cache-latest` reference reads every supported platform.
 
 ## Run builds
 
@@ -86,17 +82,10 @@ those admitted inputs. The workflow must serialize builds for the cache package;
 each coordinator loads and updates its platform's cumulative cache head. Outputs
 become available during builds.
 
-The three platform heads retain every previously cached output. Each publication
-writes the same manifest under the existing platform tag and a historical tag:
-`nixos-cache-<system>-run-<run-id>-attempt-<attempt>-publication-<number>`.
-The run ID and attempt identify the workflow execution; the platform identifies
-the coordinator, and the publication number distinguishes updates within its job.
-The historical tag is written first, before moving the platform tag. Each
-publication then retires its superseded head. The coordinator imports and verifies
-helper outputs, signs their cache records, and durably publishes them before
-retiring the helper's input and result manifests. Active helper artifacts add a fixed number of
-temporary versions. Admission cleans up interrupted runs; artifacts from expired
-or ambiguous helper leases wait for that recovery.
+Each platform head retains all previously cached outputs. Publication tags the
+new generation before advancing the head, then retires the superseded manifest.
+Helper artifacts are retired after their outputs have been verified, signed, and
+published. Admission cleans up artifacts left by interrupted runs.
 
 Versions explicitly protected by GitHub's public-package download limit are kept,
 including their historical tags, without blocking publication or assignments.
@@ -117,12 +106,8 @@ action so it inherits GitHub's short-lived runtime credentials; ordinary shell
 steps do not receive them automatically. Admission does not use the coordination
 service.
 
-Each mailbox update has an immutable, opaque key bound to the request, source
-revision, run, attempt, platform, and runner. Prefix lookup selects the latest
-entry; cached or stale reads never renew a lease. Missing or evicted records
-expire through the existing lease handling, and failed helper work returns to
-the coordinator. GitHub automatically evicts unused entries after seven days.
-Platform caches and encrypted helper build payloads share the main GHCR package.
+Coordination messages are bound to the request, source revision, run, attempt,
+platform, and runner. Missing or expired messages return work to the coordinator.
 
 Helpers must not receive the final cache signing key. The worker removes
 credential environment variables before executing build subprocesses and

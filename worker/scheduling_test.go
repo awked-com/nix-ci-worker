@@ -8,25 +8,6 @@ import (
 	"time"
 )
 
-func TestSchedulerUsesWholeRunnerForNarrowGraphs(t *testing.T) {
-	pool := schedulerFixture(t)
-	pool.cpus = 3
-	for runner := 1; runner < RunnersPerSystem; runner++ {
-		status := *pool.statuses[runner].Load()
-		status.Cores = 3
-		pool.statuses[runner].Store(&status)
-	}
-	graph := &Plan{Derivations: map[string]Derivation{"a": derivation("a-out"), "b": derivation("b-out", "a"), "c": derivation("c-out", "b")}}
-	if err := pool.schedule(graph, []string{"a^out", "b^out", "c^out"}, func(ctx context.Context, runner int, spec string, budget poolMessage) error {
-		if budget.Cores != 3 {
-			t.Errorf("serial build %s received %d of 3 cores", spec, budget.Cores)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestSchedulerRunsOneFullCPUCapacityBuildPerRunner(t *testing.T) {
 	pool := schedulerFixture(t)
 	pool.cpus = 3

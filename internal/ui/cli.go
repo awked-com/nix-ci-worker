@@ -1,4 +1,3 @@
-// Package ui formats human-facing help and diagnostics without touching data streams.
 package ui
 
 import (
