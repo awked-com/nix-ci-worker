@@ -1,6 +1,6 @@
 # Nix CI worker
 
-Run a command with `--help` for usage. Set `NO_COLOR=1` to disable terminal colors.
+Run a command with `--help` for usage.
 
 ## Build and test
 
@@ -52,9 +52,7 @@ Without arguments the executable runs the GitHub Actions worker protocol.
 Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
 source flake. Select host system derivations and required checks there; their
 transitive dependencies determine which packages need building on each platform.
-Optional host/package selection follows NixOS configuration attributes; see
-[`SelectedTargets`](worker/planner.go). For supported systems and runner labels,
-see [`Systems`](worker/planner.go).
+Optional host/package selection follows NixOS configuration attributes.
 
 The workflow supplies these environment variables:
 
@@ -112,7 +110,3 @@ platform, and runner. Missing or expired messages return work to the coordinator
 Helpers must not receive the final cache signing key. The worker removes
 credential environment variables before executing build subprocesses and
 suppresses private failure details in its top-level error output.
-
-## Use from Go
-
-Import `github.com/awked-com/nix-ci-worker/worker`. Run `go doc ./worker` for the API.

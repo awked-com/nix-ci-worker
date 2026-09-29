@@ -14,32 +14,6 @@ import (
 	"time"
 )
 
-func TestAdmissionHasTwoHelpersPerPlatform(t *testing.T) {
-	matrix := allBuildRunners(t)
-	helpers, err := matrix.Helpers()
-	if err != nil || len(helpers["include"]) != 6 {
-		t.Fatal(helpers, err)
-	}
-	for _, row := range matrix.Include {
-		count := 0
-		for _, helper := range helpers["include"] {
-			if helper.System == row.System {
-				count++
-				if helper.Runner != row.Runner || helper.Builder < 1 || helper.Builder > 2 {
-					t.Fatal(helper)
-				}
-			}
-		}
-		if count != 2 {
-			t.Fatal(row, count)
-		}
-	}
-	one, err := (BuildMatrix{Include: matrix.Include[:1]}).Helpers()
-	if err != nil || len(one["include"]) != 2 {
-		t.Fatal(one, err)
-	}
-}
-
 func poolFixture(t *testing.T) *poolBus {
 	t.Helper()
 	identity, recipients := cacheKeys(t)

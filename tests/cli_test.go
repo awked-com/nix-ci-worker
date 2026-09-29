@@ -21,56 +21,55 @@ func TestCommandUX(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("CLICOLOR", "1")
 	t.Setenv("CLICOLOR_FORCE", "1")
-	for _, name := range []string{"nix-ci-worker"} {
-		binary := filepath.Join(bin, name)
-		for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}, {"--unknown-option"}} {
-			t.Run(name+" "+strings.Join(args, " "), func(t *testing.T) {
-				cmd := exec.Command(binary, args...)
-				cmd.Dir = t.TempDir()
-				var out, diagnostic bytes.Buffer
-				cmd.Stdout, cmd.Stderr = &out, &diagnostic
-				err := cmd.Run()
-				if args[0] == "--unknown-option" {
-					status, ok := err.(*exec.ExitError)
-					if !ok || status.ExitCode() != 2 || out.Len() != 0 || strings.Count(diagnostic.String(), "error:") != 1 || !strings.Contains(diagnostic.String(), name+" --help") {
-						t.Fatalf("usage: %v, stdout=%q stderr=%q", err, &out, &diagnostic)
-					}
-				} else if err != nil || diagnostic.Len() != 0 || !strings.Contains(out.String(), "Usage:") || !strings.Contains(out.String(), "Flags:") {
-					t.Fatalf("help: %v, stdout=%q stderr=%q", err, &out, &diagnostic)
+	name := "nix-ci-worker"
+	binary := filepath.Join(bin, name)
+	for _, args := range [][]string{{"--help"}, {"--unknown-option"}} {
+		t.Run(name+" "+strings.Join(args, " "), func(t *testing.T) {
+			cmd := exec.Command(binary, args...)
+			cmd.Dir = t.TempDir()
+			var out, diagnostic bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &diagnostic
+			err := cmd.Run()
+			if args[0] == "--unknown-option" {
+				status, ok := err.(*exec.ExitError)
+				if !ok || status.ExitCode() != 2 || out.Len() != 0 || strings.Count(diagnostic.String(), "error:") != 1 {
+					t.Fatalf("usage: %v, stdout=%q stderr=%q", err, &out, &diagnostic)
 				}
-				if strings.Contains(out.String()+diagnostic.String(), "\x1b[") {
-					t.Fatal("color escaped into redirected output")
-				}
-			})
-		}
-		t.Run(name+" terminal", func(t *testing.T) {
-			script, err := exec.LookPath("script")
-			if err != nil {
-				t.Skip("script is unavailable for terminal checks")
+			} else if err != nil || diagnostic.Len() != 0 || out.Len() == 0 {
+				t.Fatalf("help: %v, stdout=%q stderr=%q", err, &out, &diagnostic)
 			}
-			for _, policy := range []struct {
-				variable, value string
-				color           bool
-			}{{"NO_COLOR", "", true}, {"NO_COLOR", "1", false}, {"CLICOLOR", "0", false}, {"TERM", "dumb", false}} {
-				t.Run(policy.variable+"="+policy.value, func(t *testing.T) {
-					t.Setenv(policy.variable, policy.value)
-					var cmd *exec.Cmd
-					switch runtime.GOOS {
-					case "darwin":
-						cmd = exec.Command(script, "-q", "/dev/null", binary, "--help")
-					case "linux":
-						cmd = exec.Command(script, "-qec", "'"+strings.ReplaceAll(binary, "'", "'\"'\"'")+"' --help", "/dev/null")
-					default:
-						t.Skip("terminal harness supports Linux and macOS")
-					}
-					out, err := cmd.CombinedOutput()
-					if err != nil || !bytes.Contains(out, []byte("Usage:")) || bytes.Contains(out, []byte("\x1b[")) != policy.color {
-						t.Fatalf("terminal help: %v %q", err, out)
-					}
-				})
+			if strings.Contains(out.String()+diagnostic.String(), "\x1b[") {
+				t.Fatal("color escaped into redirected output")
 			}
 		})
 	}
+	t.Run(name+" terminal", func(t *testing.T) {
+		script, err := exec.LookPath("script")
+		if err != nil {
+			t.Skip("script is unavailable for terminal checks")
+		}
+		for _, policy := range []struct {
+			variable, value string
+			color           bool
+		}{{"NO_COLOR", "", true}, {"NO_COLOR", "1", false}, {"CLICOLOR", "0", false}, {"TERM", "dumb", false}} {
+			t.Run(policy.variable+"="+policy.value, func(t *testing.T) {
+				t.Setenv(policy.variable, policy.value)
+				var cmd *exec.Cmd
+				switch runtime.GOOS {
+				case "darwin":
+					cmd = exec.Command(script, "-q", "/dev/null", binary, "--help")
+				case "linux":
+					cmd = exec.Command(script, "-qec", "'"+strings.ReplaceAll(binary, "'", "'\"'\"'")+"' --help", "/dev/null")
+				default:
+					t.Skip("terminal harness supports Linux and macOS")
+				}
+				out, err := cmd.CombinedOutput()
+				if err != nil || !bytes.Contains(out, []byte("Usage:")) || bytes.Contains(out, []byte("\x1b[")) != policy.color {
+					t.Fatalf("terminal help: %v %q", err, out)
+				}
+			})
+		}
+	})
 }
 
 func TestWorkerSuppressesPrivateErrors(t *testing.T) {

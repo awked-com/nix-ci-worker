@@ -6,8 +6,11 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"filippo.io/age"
 )
 
 func TestRetentionReportsHTTPFailuresWithoutPrivateErrors(t *testing.T) {
@@ -135,4 +138,45 @@ func TestPruneStopsWhenCandidateReadFails(t *testing.T) {
 	if !errors.Is(err, failure) || deleted != 0 || len(f.deleted) != 0 {
 		t.Fatal("deleted after failed check", deleted, err)
 	}
+}
+
+func publishedRetentionFixture(t *testing.T, count int) (*retentionFixture, *memoryCache) {
+	t.Helper()
+	key, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipients := Secret{Data: []byte(key.Recipient().String())}
+	storage := newMemoryCache()
+	f := &retentionFixture{manifests: map[string]Manifest{}}
+	for i := 1; i <= count; i++ {
+		snapshot := NewSnapshot(storage, cacheTestRepository)
+		snapshot.Metadata = map[string]any{"kind": "pool", "run": "1", "sequence": i}
+		digest, err := snapshot.Publish("nixos-cache-pool-1-1-aarch64-linux-inputs-0", recipients)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.add(int64(i), []string{}, nil)
+		f.versions[i-1].Name = digest
+	}
+	return f, storage
+}
+
+type delayedRetentionStorage struct {
+	Storage
+	delay     time.Duration
+	active    atomic.Int64
+	maxActive atomic.Int64
+}
+
+func (s *delayedRetentionStorage) GetManifest(repository, reference string) (Manifest, string, error) {
+	active := s.active.Add(1)
+	defer s.active.Add(-1)
+	for peak := s.maxActive.Load(); active > peak; peak = s.maxActive.Load() {
+		if s.maxActive.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+	time.Sleep(s.delay)
+	return s.Storage.GetManifest(repository, reference)
 }
