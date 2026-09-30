@@ -387,6 +387,7 @@ func TestRunnerEnvironmentStripsCredentialsAndActionTracking(t *testing.T) {
 		"INPUT_REQUEST",
 		"ACTIONS_TOKEN",
 		"GITHUB_TOKEN",
+		"GH_TOKEN",
 		"RUNNER_TRACKING_ID",
 	} {
 		t.Setenv(name, "private")

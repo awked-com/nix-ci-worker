@@ -97,10 +97,15 @@ func Int(v any) int {
 	case int:
 		return n
 	case float64:
-		return int(n)
+		i := int(n)
+		if float64(i) == n {
+			return i
+		}
 	case json.Number:
-		i, _ := n.Int64()
-		return int(i)
+		i, err := n.Int64()
+		if err == nil && int64(int(i)) == i {
+			return int(i)
+		}
 	}
 
 	return 0

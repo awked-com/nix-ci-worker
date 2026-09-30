@@ -29,7 +29,7 @@ func BuildEnvironment() []string {
 	env := []string{}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == "RUNNER_TRACKING_ID" || key == "NIX_SIGNING_KEY" {
+		if key == "RUNNER_TRACKING_ID" || key == "NIX_SIGNING_KEY" || key == "GH_TOKEN" {
 			continue
 		}
 
