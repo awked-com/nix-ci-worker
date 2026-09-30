@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"time"
 )
 
 func PlatformTag(system string) string { return "nixos-cache-" + system }
@@ -115,15 +116,35 @@ func storeResult(snapshot *Snapshot, metadata map[string]any, recipients Secret)
 }
 
 type livePublisher struct {
-	snapshot   *Snapshot
-	system     string
-	run        string
-	attempt    int
-	recipients Secret
-	retire     func(...string) error
-	log        io.Writer
-	published  int
-	failed     error
+	snapshot      *Snapshot
+	system        string
+	run           string
+	attempt       int
+	recipients    Secret
+	retire        func(...string) error
+	log           io.Writer
+	published     int
+	failed        error
+	dirty         bool
+	lastPublished time.Time
+}
+
+// Callers keep pending outputs locally and retain helper manifests until a
+// head update succeeds. Retirement and disk reclamation require a forced flush.
+func (p *livePublisher) flush(delta *Snapshot, force bool) (bool, error) {
+	if p.failed != nil {
+		return false, p.failed
+	}
+	if !p.dirty {
+		return true, nil
+	}
+	if !force && !p.lastPublished.IsZero() && time.Since(p.lastPublished) < publicationInterval {
+		return false, nil
+	}
+	if err := p.publish(delta, false); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (p *livePublisher) publish(delta *Snapshot, terminal bool) error {
@@ -131,10 +152,15 @@ func (p *livePublisher) publish(delta *Snapshot, terminal bool) error {
 		return p.failed
 	}
 	p.failed = p.update(delta, terminal)
+	if p.failed == nil {
+		p.dirty = false
+		p.lastPublished = time.Now()
+	}
 	return p.failed
 }
 
 func (p *livePublisher) update(delta *Snapshot, terminal bool) error {
+	started := time.Now()
 	if _, ok := Systems[p.system]; !ok || !validRetentionRun(p.run) || p.attempt < 1 {
 		return errors.New("invalid cache publication identity")
 	}
@@ -173,7 +199,7 @@ func (p *livePublisher) update(delta *Snapshot, terminal bool) error {
 	}
 	p.published++
 	if p.log != nil {
-		fmt.Fprintf(p.log, "Cache published: %s (%d cached paths)\n", p.system, len(p.snapshot.Narinfos))
+		fmt.Fprintf(p.log, "Cache published: %s (%d cached paths, %.1fs)\n", p.system, len(p.snapshot.Narinfos), time.Since(started).Seconds())
 	}
 	if p.retire != nil && previous != "" && previous != p.snapshot.Digest {
 		return p.retire(previous)

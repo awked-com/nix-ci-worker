@@ -92,6 +92,61 @@ func TestRollingRetirementKeepsHeadsAndManualPins(t *testing.T) {
 	}
 }
 
+func TestRollingRetirementStopsInventoryAfterMatchingDigests(t *testing.T) {
+	for _, position := range []int{1, 150} {
+		t.Run(strconv.Itoa(position), func(t *testing.T) {
+			f := &retentionFixture{manifests: map[string]Manifest{}}
+			var target string
+			for id := 1; id <= 350; id++ {
+				digest := f.add(int64(id), []string{}, map[string]any{"kind": "pool", "run": "1"})
+				if id == position {
+					target = digest
+				}
+			}
+			api := func(path, method string) (any, error) {
+				parsed, _ := url.Parse(path)
+				page, _ := strconv.Atoi(parsed.Query().Get("page"))
+				if page > (position-1)/100+1 {
+					return nil, errors.New("unrelated old inventory is unavailable")
+				}
+				return f.api(path, method)
+			}
+			if err := newVersionRetirer(api, retentionStorage{fixture: f}, cacheTestRepository).retire(target); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(f.deleted, []int64{int64(position)}) {
+				t.Fatal("retirement did not delete only the matching digest", f.deleted)
+			}
+		})
+	}
+}
+
+func TestRollingRetirementScansUntilMissingDigestsAreResolved(t *testing.T) {
+	for _, repeated := range []bool{false, true} {
+		t.Run(strconv.FormatBool(repeated), func(t *testing.T) {
+			f := &retentionFixture{manifests: map[string]Manifest{}}
+			first := ""
+			for id := 1; id <= 250; id++ {
+				digest := f.add(int64(id), []string{}, map[string]any{"kind": "pool", "run": "1"})
+				if id == 1 {
+					first = digest
+				}
+			}
+			missing := f.add(251, []string{}, map[string]any{"kind": "pool", "run": "1"})
+			f.versions = f.versions[:250]
+			api := func(path, method string) (any, error) {
+				if repeated {
+					path = strings.Replace(path, "page=2", "page=1", 1)
+				}
+				return f.api(path, method)
+			}
+			if err := newVersionRetirer(api, retentionStorage{fixture: f}, cacheTestRepository).retire(first, missing); err == nil || len(f.deleted) != 0 {
+				t.Fatal("incomplete inventory allowed a partial retirement", err, f.deleted)
+			}
+		})
+	}
+}
+
 func TestRollingRetirementValidatesBeforeDeletionAndRechecksPins(t *testing.T) {
 	for _, change := range []string{"invalid", "duplicate", "unowned", "pin", "missing", "delete failure"} {
 		t.Run(change, func(t *testing.T) {

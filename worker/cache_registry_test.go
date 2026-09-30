@@ -583,6 +583,40 @@ func TestRegistryRejectsPlaintextAndUnsafeUploadLocations(t *testing.T) {
 	}
 }
 
+func TestRegistryReusesOnlyConfirmedConfigUploads(t *testing.T) {
+	fixture, registry := newRegistryFixture(t)
+	registry.auth = RegistryCredential("user", "token")
+	fixture.failWrite = 400
+	if _, err := registry.UploadBlob(cacheTestRepository, strings.NewReader("{}"), false); err == nil {
+		t.Fatal("failed config upload succeeded")
+	}
+	fixture.failWrite = 0
+	var group sync.WaitGroup
+	for range 12 {
+		group.Go(func() {
+			descriptor, err := registry.UploadBlob(cacheTestRepository, strings.NewReader("{}"), false)
+			if err != nil {
+				t.Error(err)
+			} else if descriptor.Digest != contentDigest([]byte("{}")) || descriptor.Size != 2 {
+				t.Error("invalid cached config descriptor")
+			}
+		})
+	}
+	group.Wait()
+	if len(fixture.uploads) != 1 {
+		t.Fatalf("concurrent config publications created %d upload sessions", len(fixture.uploads))
+	}
+	if _, err := registry.UploadBlob(cacheTestRepository, strings.NewReader("{}tail"), false); err == nil {
+		t.Fatal("cached config bypassed plaintext validation")
+	}
+	if _, err := registry.UploadBlob("ghcr.io/other/cache", strings.NewReader("{}"), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.uploads) != 2 {
+		t.Fatal("config descriptor reused across repositories")
+	}
+}
+
 func TestRegistryRateLimitsRetryWithoutReconsumingStream(t *testing.T) {
 	fixture, registry := newRegistryFixture(t)
 	fixture.rateLimit = true

@@ -74,7 +74,9 @@ The workflow supplies these environment variables:
 The storage owner/package must match `GITHUB_REPOSITORY`. Retry jobs with the
 admitted matrices and source revision. The workflow must serialize builds for
 the cache package; each coordinator loads and updates its platform's cumulative
-cache head. Outputs become available during builds.
+cache head. Coordinators batch head updates on a 30-second publication cadence
+while runners continue independent builds. Completion and disk reclamation force
+pending outputs into the head. Outputs become available during builds.
 
 Each platform head retains all previously cached outputs. Publication tags the
 new generation before advancing the head, then retires the superseded manifest.

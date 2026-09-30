@@ -174,6 +174,15 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 
 func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 	nativeEnabled(t)
+	for _, failure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retirement-failure=%v", failure), func(t *testing.T) {
+			testNativePoolDependencyGraph(t, failure)
+		})
+	}
+}
+
+func testNativePoolDependencyGraph(t *testing.T, failRetirement bool) {
+	t.Helper()
 	t.Setenv("GITHUB_ACTIONS", "")
 	system, err := NativeSystem()
 	if err != nil {
@@ -195,7 +204,36 @@ func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 	}
 	versions := &registryVersions{storage: storage}
 	retirer := newVersionRetirer(versions.api, storage, bus.repository)
-	bus.retire = retirer.retire
+	retirementError := errors.New("helper retirement unavailable")
+	failedHead := ""
+	failedArtifacts := []string{}
+	bus.retire = func(digests ...string) error {
+		head, err := LoadSnapshot(storage, bus.repository, PlatformTag(system), identity)
+		if err != nil {
+			return fmt.Errorf("helper retirement before durable head: %w", err)
+		}
+		for _, digest := range digests {
+			artifact, err := LoadSnapshot(storage, bus.repository, digest, identity)
+			if err != nil {
+				return err
+			}
+			for _, text := range artifact.Narinfos {
+				fields, err := NarinfoFields(text)
+				if err != nil {
+					return err
+				}
+				if !head.Contains(fields["StorePath"]) {
+					return errors.New("helper artifact retired before its paths reached the durable head")
+				}
+			}
+		}
+		if failRetirement && failedHead == "" {
+			failedHead = head.Digest
+			failedArtifacts = append(failedArtifacts, digests...)
+			return retirementError
+		}
+		return retirer.retire(digests...)
+	}
 	timing := poolTiming{20 * time.Millisecond, 50 * time.Millisecond, 10 * time.Second, 10 * time.Second}
 	var output bytes.Buffer
 	log := &buildLog{Writer: &output}
@@ -231,7 +269,11 @@ func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 		secrets: buildSecrets{identity: identity, recipients: recipients, signingKey: Secret{Data: signing}},
 		live:    &livePublisher{system: system, run: bus.run, attempt: bus.attempt, recipients: recipients, retire: retirer.retire, log: log},
 	}).execute()
-	if err != nil || !success {
+	if failRetirement {
+		if success || !errors.Is(err, retirementError) {
+			t.Fatalf("retirement failure was lost: success=%v err=%v\n%s", success, err, &output)
+		}
+	} else if err != nil || !success {
 		t.Fatalf("pool build: success=%v err=%v\n%s", success, err, &output)
 	}
 	for range 2 {
@@ -249,6 +291,18 @@ func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 		if err != nil || status.State != "done" || status.Sequence == 0 {
 			t.Fatal("helper did not build", runner, status, err)
 		}
+	}
+	if failRetirement {
+		head, err := LoadSnapshot(storage, bus.repository, PlatformTag(system), identity)
+		if err != nil || failedHead == "" || head.Digest != failedHead {
+			t.Fatal("head advanced after a helper cleanup failure", failedHead, head, err)
+		}
+		for _, digest := range failedArtifacts {
+			if _, _, err := storage.GetManifest(bus.repository, digest); err != nil {
+				t.Fatal("helper artifact was removed after cleanup failed", digest, err)
+			}
+		}
+		return
 	}
 	saved, err := LoadResult(storage, bus.repository, bus.run, system, bus.attempt, identity)
 	if err != nil {

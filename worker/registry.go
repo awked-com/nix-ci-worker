@@ -143,6 +143,8 @@ type Registry struct {
 	HTTP, UploadHTTP                    *http.Client
 	tokensMu, writeTokensMu, cooldownMu sync.Mutex
 	tokens, writeTokens                 map[string]registryToken
+	configsMu                           sync.Mutex
+	configs                             map[string]Descriptor
 	cooldownUntil                       time.Time
 	now                                 func() time.Time
 	sleep                               func(time.Duration)
@@ -198,6 +200,7 @@ func NewRegistry(auth Secret) *Registry {
 		},
 		tokens:        map[string]registryToken{},
 		writeTokens:   map[string]registryToken{},
+		configs:       map[string]Descriptor{},
 		now:           time.Now,
 		sleep:         time.Sleep,
 		jitter:        func() time.Duration { return time.Duration(rand.Int64N(int64(5 * time.Second))) },
@@ -566,7 +569,11 @@ func (r *Registry) UploadBlob(repository string, source io.Reader, encrypted boo
 		return empty, err
 	}
 
-	first := make([]byte, UploadChunkSize)
+	firstSize := UploadChunkSize
+	if !encrypted {
+		firstSize = 3
+	}
+	first := make([]byte, firstSize)
 	n, readErr := io.ReadFull(source, first)
 	first = first[:n]
 	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
@@ -575,7 +582,7 @@ func (r *Registry) UploadBlob(repository string, source io.Reader, encrypted boo
 
 	var next []byte
 	if readErr == nil {
-		buffer := make([]byte, UploadChunkSize)
+		buffer := make([]byte, firstSize)
 		n, err := io.ReadFull(source, buffer)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return empty, err
@@ -589,6 +596,15 @@ func (r *Registry) UploadBlob(repository string, source io.Reader, encrypted boo
 	}
 	if !encrypted && (!bytes.Equal(first, []byte("{}")) || len(next) > 0) {
 		return empty, errors.New("only an empty OCI config may be uploaded as plaintext")
+	}
+	if !encrypted {
+		// Every manifest shares this content address. Cache only confirmed uploads;
+		// concurrent publications must not start duplicate config upload sessions.
+		r.configsMu.Lock()
+		defer r.configsMu.Unlock()
+		if config, ok := r.configs[repository]; ok {
+			return config, nil
+		}
 	}
 
 	base := "https://ghcr.io/v2/" + owner + "/" + packageName
@@ -639,7 +655,7 @@ func (r *Registry) UploadBlob(repository string, source io.Reader, encrypted boo
 		return empty, err
 	}
 
-	buffer := make([]byte, UploadChunkSize)
+	buffer := make([]byte, firstSize)
 	for {
 		n, err := io.ReadFull(source, buffer)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
@@ -661,11 +677,15 @@ func (r *Registry) UploadBlob(repository string, source io.Reader, encrypted boo
 	query.Set("digest", digest)
 	u.RawQuery = query.Encode()
 	err = r.completeBlob(repository, base, u.String(), digest, size)
-	return Descriptor{
+	descriptor := Descriptor{
 		Digest:    digest,
 		Size:      size,
 		MediaType: "application/octet-stream",
-	}, err
+	}
+	if err == nil && !encrypted {
+		r.configs[repository] = descriptor
+	}
+	return descriptor, err
 }
 
 func transientUploadStatus(status int) bool {

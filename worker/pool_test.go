@@ -412,7 +412,7 @@ func TestSchedulerUsesEveryRunnerAndUnlocksDependenciesImmediately(t *testing.T)
 	defer once.Do(func() { close(release) })
 	done := make(chan error, 1)
 	go func() {
-		done <- p.schedule(graph, []string{"a^out", "b^out", "c^out", "d^out", "e^out", "f^out", "g^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+		done <- p.schedule(p.ctx, graph, []string{"a^out", "b^out", "c^out", "d^out", "e^out", "f^out", "g^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 			started <- fmt.Sprintf("%d:%s", runner, spec)
 			if spec == "a^out" {
 				time.Sleep(30 * time.Millisecond)
@@ -461,7 +461,7 @@ func TestSchedulerRetriesRemoteFailureLocallyAndKeepsOtherWork(t *testing.T) {
 	var mu sync.Mutex
 	type attempts struct{ local, remote int }
 	counts := map[string]attempts{}
-	err := p.schedule(graph, []string{"a^out", "b^out", "c^out", "d^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+	err := p.schedule(p.ctx, graph, []string{"a^out", "b^out", "c^out", "d^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 		mu.Lock()
 		defer mu.Unlock()
 		count := counts[spec]
@@ -632,7 +632,7 @@ func TestCoordinatorRejectsHelperEvaluationPlans(t *testing.T) {
 func TestSchedulerKeepsHelpersWhileDependenciesCanUnlockWork(t *testing.T) {
 	p := schedulerFixture(t)
 	graph := &Plan{Derivations: map[string]Derivation{"a": derivation("a-out"), "b": derivation("b-out", "a")}}
-	err := p.schedule(graph, []string{"a^out", "b^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+	err := p.schedule(p.ctx, graph, []string{"a^out", "b^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 		if spec == "a^out" && p.finish.Load() != nil {
 			return errors.New("helpers drained with unassigned dependent work")
 		}
@@ -662,7 +662,7 @@ func TestSchedulerAllowsHelpersToExitAfterFinalAssignment(t *testing.T) {
 		}
 		finished := make(chan struct{})
 		var builds [RunnersPerSystem]atomic.Int32
-		err := p.schedule(graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+		err := p.schedule(p.ctx, graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 			builds[runner].Add(1)
 			if runner != 2 {
 				select {
@@ -708,7 +708,7 @@ func TestSchedulerRetriesExpiredFinalAssignmentOnCoordinator(t *testing.T) {
 	p.ctx = ctx
 	graph := &Plan{Derivations: map[string]Derivation{"a": derivation("a-out"), "b": derivation("b-out"), "c": derivation("c-out")}}
 	var attempts [RunnersPerSystem]atomic.Int32
-	err := p.schedule(graph, []string{"a^out", "b^out", "c^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+	err := p.schedule(p.ctx, graph, []string{"a^out", "b^out", "c^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 		attempts[runner].Add(1)
 		if runner == 0 {
 			return nil
@@ -744,7 +744,7 @@ func TestSchedulerStopsAssignmentsWhenRetirementFails(t *testing.T) {
 		missing = append(missing, drv+"^out")
 	}
 	var started atomic.Int32
-	err := p.schedule(graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+	err := p.schedule(p.ctx, graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 		started.Add(1)
 		return fmt.Errorf("%w: retirement failed", errPoolPublication)
 	})

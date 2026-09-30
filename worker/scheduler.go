@@ -67,16 +67,18 @@ func poolCompatible(d Derivation, system string, features []string) bool {
 }
 
 type poolCompletion struct {
-	runner int
-	drv    string
-	err    error
+	runner   int
+	sequence uint64
+	drv      string
+	released bool
+	err      error
 }
 
 var errPoolPublication = errors.New("builder result publication failed")
 
-// The coordinator is the only assigner. No registry tag is used as a lock, and
-// a runner remains busy through result publication, not just compilation.
-func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context.Context, int, string, poolMessage) error) error {
+// The coordinator is the only assigner. Runners can start independent work
+// while their previous result is published; dependencies wait for publication.
+func (p *BuildPool) schedule(ctx context.Context, graph *Plan, missing []string, execute func(context.Context, int, string, poolMessage, func()) error) error {
 	if _, err := graph.Batches(missing, 1); err != nil {
 		return err
 	}
@@ -91,6 +93,7 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 	priorities := poolPriorities(deps)
 	order := poolOrder(specs, priorities)
 	allocated := [RunnersPerSystem]bool{}
+	pending := [RunnersPerSystem]int{}
 	locality := [RunnersPerSystem]map[string]bool{}
 	for runner := range locality {
 		locality[runner] = map[string]bool{}
@@ -100,15 +103,18 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 	retired := [RunnersPerSystem]bool{}
 	sequences := [RunnersPerSystem]uint64{}
 	instances := [RunnersPerSystem]string{}
-	ctx, cancel := context.WithCancel(p.ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	var group sync.WaitGroup
 	defer func() { cancel(); group.Wait() }()
-	done := make(chan poolCompletion, RunnersPerSystem)
+	done := make(chan poolCompletion, 2*RunnersPerSystem)
 	ticker := time.NewTicker(p.timing.poll)
 	defer ticker.Stop()
 	deadline := time.Now().Add(p.timing.startup)
 	var failure error
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Propagate failures so independent branches still finish and get cached.
 		changed := true
 		for changed {
@@ -137,8 +143,27 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 			}
 			return true
 		}
+		delegatable := func(drv string) bool {
+			if retryLocal[drv] {
+				return false
+			}
+			for runner := 1; runner < RunnersPerSystem; runner++ {
+				message := p.statuses[runner].Load()
+				if retired[runner] || !poolFresh(message, p.timing.lease) || message.Instance == "" ||
+					instances[runner] != "" && message.Instance != instances[runner] ||
+					!validFeatures(message.Features) || message.Cores < 1 || message.Cores > 256 {
+					continue
+				}
+				if poolCompatible(graph.Derivations[drv], p.bus.system, message.Features) {
+					return true
+				}
+			}
+			return false
+		}
 		for runner := range RunnersPerSystem {
-			if allocated[runner] || retired[runner] {
+			// Keep at most one previous publication beside the current build.
+			// A slow registry must not accumulate an unbounded output backlog.
+			if allocated[runner] || pending[runner] >= 2 || retired[runner] {
 				continue
 			}
 			remote := poolMessage{Cores: p.cpus}
@@ -171,6 +196,7 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 			}
 			selected := ""
 			warmest := -1
+			selectedLocal := false
 			for _, drv := range order {
 				if !ready(drv) {
 					continue
@@ -184,14 +210,19 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 						warm++
 					}
 				}
-				if selected == "" || priorities[drv] == priorities[selected] && warm > warmest {
+				// Keep the coordinator available for work that no live helper can
+				// accept. Otherwise compatible work can strand local-only branches.
+				local := runner == 0 && !delegatable(drv)
+				if selected == "" || local && !selectedLocal || local == selectedLocal && priorities[drv] == priorities[selected] && warm > warmest {
 					selected, warmest = drv, warm
+					selectedLocal = local
 				}
 			}
 			if selected == "" {
 				continue
 			}
 			allocated[runner] = true
+			pending[runner]++
 			state[selected] = "running"
 			sequences[runner]++
 			remote.Sequence = sequences[runner]
@@ -199,8 +230,18 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 			group.Add(1)
 			go func(runner int, drv string, remote poolMessage) {
 				defer group.Done()
-				err := execute(ctx, runner, specs[drv], remote)
-				done <- poolCompletion{runner, drv, err}
+				send := func(event poolCompletion) {
+					select {
+					case done <- event:
+					case <-ctx.Done():
+					}
+				}
+				var released sync.Once
+				release := func() {
+					released.Do(func() { send(poolCompletion{runner: runner, sequence: remote.Sequence, drv: drv, released: true}) })
+				}
+				err := execute(ctx, runner, specs[drv], remote, release)
+				send(poolCompletion{runner: runner, sequence: remote.Sequence, drv: drv, err: err})
 			}(runner, selected, remote)
 		}
 		unassigned, active := false, false
@@ -222,7 +263,13 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 			return ctx.Err()
 		case <-ticker.C:
 		case result := <-done:
-			allocated[result.runner] = false
+			if result.sequence == sequences[result.runner] {
+				allocated[result.runner] = false
+			}
+			if result.released {
+				continue
+			}
+			pending[result.runner]--
 			if errors.Is(result.err, errPoolPublication) {
 				return result.err
 			}
@@ -239,7 +286,7 @@ func (p *BuildPool) schedule(graph *Plan, missing []string, execute func(context
 					for dep := range graph.Derivations[result.drv].InputDrvs {
 						warm[dep] = true
 					}
-					fmt.Fprintf(p.log, "Finished build: %s/%d task %d\n", p.bus.system, result.runner, sequences[result.runner])
+					fmt.Fprintf(p.log, "Finished build: %s/%d task %d\n", p.bus.system, result.runner, result.sequence)
 				}
 				if result.err != nil {
 					state[result.drv], failure = "failed", errors.New("coordinator build failed")
@@ -314,30 +361,65 @@ func (p *BuildPool) remoteTask(ctx context.Context, runner int, remote poolMessa
 	}
 }
 
-func (p *BuildPool) build(source, system string, graph *Plan, missing []string, delta *Snapshot, signingKey, recipients Secret, log io.Writer, options []string, after func() (*snapshotIndex, error)) error {
+func (p *BuildPool) build(source, system string, graph *Plan, missing []string, delta *Snapshot, signingKey, recipients Secret, log io.Writer, options []string, after func(bool) (*snapshotIndex, bool, error)) error {
 	public, err := signingPublicKey(signingKey.Data)
 	if err != nil {
 		return err
 	}
 	var inputs atomic.Pointer[snapshotIndex]
-	refresh := func() error {
-		index, err := after()
+	retirements := []string{}
+	refresh := func(force bool) error {
+		index, headCurrent, err := after(force)
 		if err != nil {
 			return err
 		}
 		// extend replaces the index's maps; active assignments keep this view.
 		view := *index
 		inputs.Store(&view)
+		if headCurrent && len(retirements) > 0 && p.bus.retire != nil {
+			if err = p.bus.retire(retirements...); err != nil {
+				return err
+			}
+			retirements = nil
+		}
 		return nil
 	}
-	if err = refresh(); err != nil {
-		return err
+	if err = refresh(false); err != nil {
+		return fmt.Errorf("%w: %w", errPoolPublication, err)
 	}
 
-	// Publishing is serialized, while the scheduler keeps assigning independent
-	// tasks to other free runners. A runner is free only after its output is durable.
+	// Publication owns mutable cache state. Runners can compile their next
+	// independent task while the preceding result waits for this lock.
 	var publication sync.Mutex
+	ctx, cancel := context.WithCancelCause(p.ctx)
+	defer cancel(nil)
+	periodic := make(chan struct{})
+	go func() {
+		defer close(periodic)
+		ticker := time.NewTicker(publicationInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				publication.Lock()
+				if ctx.Err() == nil {
+					if err := refresh(false); err != nil {
+						cancel(fmt.Errorf("%w: %w", errPoolPublication, err))
+					}
+				}
+				publication.Unlock()
+				if ctx.Err() != nil {
+					return
+				}
+			}
+		}
+	}()
 	execute := func(ctx context.Context, runner int, spec string, remote poolMessage) (*Snapshot, string, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		drv := strings.SplitN(spec, "^", 2)[0]
 		buildInputs, err := graph.BuildInputs(drv)
 		if err != nil {
@@ -350,7 +432,10 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 		for _, path := range graph.Outputs[drv] {
 			paths = append(paths, path)
 		}
-		required, _ := graph.TargetPaths(drv)
+		required := map[string]bool{}
+		for _, path := range buildInputs {
+			required[path] = true
+		}
 		input := inputs.Load().selectPaths(required)
 		input.Metadata = map[string]any{"kind": "pool", "run": p.bus.run}
 		digest, err := input.Publish(p.bus.tag("inputs", runner), recipients)
@@ -372,8 +457,15 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 		}
 		return result, digest, nil
 	}
-	return p.schedule(graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage) error {
+	err = p.schedule(ctx, graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage, release func()) error {
 		result, inputDigest, buildError := execute(ctx, runner, spec, remote)
+		if errors.Is(buildError, errPoolPublication) {
+			cancel(buildError)
+			return buildError
+		}
+		if buildError == nil {
+			release()
+		}
 		waiting := time.Now()
 		publication.Lock()
 		defer publication.Unlock()
@@ -389,19 +481,30 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 					delta.Files[name] = file
 				}
 			}
-		}
-		if err := refresh(); err != nil {
-			return fmt.Errorf("%w: %w", errPoolPublication, err)
-		}
-		// A completed helper no longer reads its inputs. Its result can be
-		// removed only after refresh has signed and durably published the output
-		// into the cumulative platform cache. Failure stops new assignments.
-		if result != nil && p.bus.retire != nil {
-			if err := p.bus.retire(inputDigest, result.Digest); err != nil {
-				return fmt.Errorf("%w: %w", errPoolPublication, err)
+			if p.bus.retire != nil {
+				retirements = append(retirements, inputDigest, result.Digest)
 			}
+		}
+		if err := refresh(false); err != nil {
+			failure := fmt.Errorf("%w: %w", errPoolPublication, err)
+			cancel(failure)
+			return failure
 		}
 		fmt.Fprintf(log, "Build result processed: %s/%d (%.1fs; waited %.1fs)\n", system, runner, time.Since(started).Seconds(), started.Sub(waiting).Seconds())
 		return buildError
 	})
+	cancel(nil)
+	<-periodic
+	if cause := context.Cause(ctx); errors.Is(cause, errPoolPublication) {
+		return cause
+	}
+	if errors.Is(err, errPoolPublication) || p.ctx.Err() != nil {
+		return err
+	}
+	// Helpers may already have exited. Retain their immutable manifests until
+	// the cumulative head covers every signed result, including partial failures.
+	if flushError := refresh(true); flushError != nil {
+		return fmt.Errorf("%w: %w", errPoolPublication, flushError)
+	}
+	return err
 }

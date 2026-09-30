@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func liveTestMetadata(run, system string, attempt int) map[string]any {
@@ -125,6 +126,110 @@ func TestLivePublicationStopsAfterRetirementFailure(t *testing.T) {
 	current, err := loadPlatform(storage, cacheTestRepository, system, identity)
 	if err != nil || !current.Contains(path) {
 		t.Fatal("cleanup failure invalidated published output", err)
+	}
+}
+
+func TestLivePublicationBatchesPendingOutputsAndForcesFinalHead(t *testing.T) {
+	identity, recipients := cacheKeys(t)
+	storage := newMemoryCache()
+	const system = "x86_64-linux"
+	delta := NewSnapshot(storage, cacheTestRepository)
+	delta.Metadata = liveTestMetadata("1", system, 1)
+	addOutput := func(char string) string {
+		t.Helper()
+		path := cacheRecord(delta, char)
+		if err := cacheAdd(delta, "cache/nar/"+strings.Repeat(char, 64)+".nar.zst", strings.NewReader("archive "+char), recipients); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	first := addOutput("a")
+	versions := &registryVersions{storage: storage}
+	retirer := newVersionRetirer(versions.api, storage, cacheTestRepository)
+	publisher := &livePublisher{snapshot: NewSnapshot(storage, cacheTestRepository), system: system, run: "1", attempt: 1, recipients: recipients, retire: func(digests ...string) error {
+		if err := retirer.retire(digests...); err != nil {
+			return err
+		}
+		collectTestBlobs(t, storage)
+		return nil
+	}}
+	publisher.dirty = true
+	if current, err := publisher.flush(delta, false); err != nil || !current {
+		t.Fatal("first output was not published immediately", current, err)
+	}
+	previous := publisher.snapshot.Digest
+	second := addOutput("b")
+	publisher.dirty = true
+	if current, err := publisher.flush(delta, false); err != nil || current || publisher.snapshot.Digest != previous {
+		t.Fatal("pending output bypassed publication cadence", current, err)
+	}
+	head, err := loadPlatform(storage, cacheTestRepository, system, identity)
+	if err != nil || !head.Contains(first) || head.Contains(second) {
+		t.Fatal("deferred output changed the durable head", err)
+	}
+	// A later poll must publish pending records even without a newly built path.
+	publisher.lastPublished = time.Now().Add(-2 * publicationInterval)
+	if current, err := publisher.flush(delta, false); err != nil || !current {
+		t.Fatal("pending output was lost between polls", current, err)
+	}
+	head, err = loadPlatform(storage, cacheTestRepository, system, identity)
+	if err != nil || !head.Contains(first) || !head.Contains(second) {
+		t.Fatal("batched head lost completed outputs", err)
+	}
+	for _, char := range []string{"a", "b"} {
+		if got := string(cacheRead(t, head, "cache/nar/"+strings.Repeat(char, 64)+".nar.zst", identity)); got != "archive "+char {
+			t.Fatal("generation retirement collected a batched archive", got)
+		}
+	}
+	third := addOutput("c")
+	publisher.dirty = true
+	if current, err := publisher.flush(delta, true); err != nil || !current {
+		t.Fatal("forced publication waited for cadence", current, err)
+	}
+	head, err = loadPlatform(storage, cacheTestRepository, system, identity)
+	if err != nil || !head.Contains(third) {
+		t.Fatal("forced publication omitted pending output", err)
+	}
+	previous = publisher.snapshot.Digest
+	if current, err := publisher.flush(delta, true); err != nil || !current || publisher.snapshot.Digest != previous {
+		t.Fatal("unchanged poll published a new generation", current, err)
+	}
+	addOutput("d")
+	publisher.dirty = true
+	if err := publisher.publish(delta, true); err != nil {
+		t.Fatal("terminal publication waited for cadence", err)
+	}
+	if publisher.dirty {
+		t.Fatal("terminal publication retained pending outputs")
+	}
+	if _, err := LoadResult(storage, cacheTestRepository, "1", system, 1, identity); err != nil {
+		t.Fatal("terminal result was not durable", err)
+	}
+}
+
+func TestLivePublicationKeepsPendingStateAfterFlushFailure(t *testing.T) {
+	_, recipients := cacheKeys(t)
+	storage := newMemoryCache()
+	const system = "aarch64-linux"
+	delta := NewSnapshot(storage, cacheTestRepository)
+	delta.Metadata = liveTestMetadata("1", system, 1)
+	cacheRecord(delta, "a")
+	publisher := &livePublisher{snapshot: NewSnapshot(storage, cacheTestRepository), system: system, run: "1", attempt: 1, recipients: recipients}
+	publisher.dirty = true
+	if _, err := publisher.flush(delta, false); err != nil {
+		t.Fatal(err)
+	}
+	previous := publisher.lastPublished
+	cacheRecord(delta, "b")
+	publisher.dirty = true
+	publisher.snapshot.Storage = &failingHeadStorage{Storage: storage, failTag: PlatformTag(system)}
+	current, failure := publisher.flush(delta, true)
+	if failure == nil || current || !publisher.dirty || publisher.lastPublished != previous {
+		t.Fatal("failed flush discarded pending state", current, failure)
+	}
+	publisher.snapshot.Storage = storage
+	if current, err := publisher.flush(delta, true); !errors.Is(err, failure) || current {
+		t.Fatal("failed flush allowed later publication", current, err)
 	}
 }
 

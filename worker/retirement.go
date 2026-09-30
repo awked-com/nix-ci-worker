@@ -2,9 +2,12 @@ package worker
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // versionRetirer handles artifacts whose ownership and lifecycle the caller
@@ -25,6 +28,7 @@ func newVersionRetirer(api GitHubAPI, storage Storage, repository string) *versi
 }
 
 func (r *versionRetirer) retire(digests ...string) error {
+	started := time.Now()
 	wanted := map[string]bool{}
 	for _, digest := range digests {
 		if !digestPattern.MatchString(digest) {
@@ -40,7 +44,7 @@ func (r *versionRetirer) retire(digests ...string) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	versions, err := r.inventory()
+	versions, err := r.inventory(wanted)
 	if err != nil {
 		return err
 	}
@@ -88,6 +92,7 @@ func (r *versionRetirer) retire(digests ...string) error {
 			remove = append(remove, version)
 		}
 	}
+	deleted := 0
 	for _, candidate := range remove {
 		path := r.endpoint + "/" + strconv.FormatInt(candidate.ID, 10)
 		value, err := r.api(path, "GET")
@@ -104,14 +109,21 @@ func (r *versionRetirer) retire(digests ...string) error {
 		if Fingerprint([]Version{current}) != Fingerprint([]Version{candidate}) {
 			return errors.New("retirement candidate changed")
 		}
-		if _, err = deleteVersion(r.api, path, r.log); err != nil && !errors.Is(err, ErrObjectNotFound) {
+		removed, err := deleteVersion(r.api, path, r.log)
+		if err != nil && !errors.Is(err, ErrObjectNotFound) {
 			return err
 		}
+		if removed {
+			deleted++
+		}
+	}
+	if r.log != nil {
+		fmt.Fprintf(r.log, "Retention: retired %d/%d requested versions (%.1fs)\n", deleted, len(digests), time.Since(started).Seconds())
 	}
 	return nil
 }
 
-func (r *versionRetirer) inventory() ([]Version, error) {
+func (r *versionRetirer) inventory(wanted map[string]bool) ([]Version, error) {
 	if r.endpoint == "" {
 		endpoint, err := EndpointFor(r.api, r.repository)
 		if err != nil {
@@ -119,5 +131,40 @@ func (r *versionRetirer) inventory() ([]Version, error) {
 		}
 		r.endpoint = endpoint
 	}
-	return versionInventory(r.api, r.endpoint)
+	// Retirement knows exact digests and rechecks every matched version before
+	// deletion. Once they are found, older inventory pages cannot affect the
+	// decision; download-protected history need not delay each publication.
+	remaining := maps.Clone(wanted)
+	versions := []Version{}
+	seen := map[int64]bool{}
+	for page := 1; ; page++ {
+		value, err := r.api(fmt.Sprintf("%s?per_page=100&page=%d", r.endpoint, page), "GET")
+		if page == 1 && errors.Is(err, ErrObjectNotFound) {
+			return versions, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		batch, err := objectList(value)
+		if err != nil {
+			return nil, err
+		}
+		for _, value := range batch {
+			version, err := decodeVersion(value)
+			if err != nil {
+				return nil, err
+			}
+			if seen[version.ID] {
+				return nil, errors.New("package inventory changed or repeated a page")
+			}
+			seen[version.ID] = true
+			if remaining[version.Name] {
+				versions = append(versions, version)
+				delete(remaining, version.Name)
+			}
+		}
+		if len(remaining) == 0 || len(batch) < 100 {
+			return versions, nil
+		}
+	}
 }

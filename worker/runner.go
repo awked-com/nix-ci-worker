@@ -289,11 +289,18 @@ type nativeBuild struct {
 	live                *livePublisher
 }
 
-func (b *nativeBuild) publish(required map[string]bool) (int, error) {
+func (b *nativeBuild) publish(required map[string]bool, force bool) (int, error) {
+	if b.live != nil && b.live.failed != nil {
+		return 0, b.live.failed
+	}
 	before := len(b.delta.Narinfos) + len(b.delta.Upstream)
 	count, err := PublishStore(b.source, required, b.delta, b.parent, b.secrets.signingKey, b.secrets.recipients, b.log, b.upstream)
-	if b.live != nil && ((b.live.published == 0 && len(b.delta.Narinfos)+len(b.delta.Upstream) > 0) || before != len(b.delta.Narinfos)+len(b.delta.Upstream)) {
-		err = errors.Join(err, b.live.publish(b.delta, false))
+	if b.live != nil {
+		if (b.live.published == 0 && len(b.delta.Narinfos)+len(b.delta.Upstream) > 0) || before != len(b.delta.Narinfos)+len(b.delta.Upstream) {
+			b.live.dirty = true
+		}
+		_, flushErr := b.live.flush(b.delta, force || err != nil)
+		err = errors.Join(err, flushErr)
 	}
 	return count, err
 }
@@ -526,9 +533,9 @@ func (b nativeBuild) execute() (bool, error) {
 			return e
 		}
 
-		publish := func(required map[string]bool) error {
+		publish := func(required map[string]bool, force bool) error {
 			covered := len(delta.Narinfos) + len(delta.Upstream)
-			if _, err := b.publish(required); err != nil {
+			if _, err := b.publish(required, force); err != nil {
 				return err
 			}
 			if covered == len(delta.Narinfos)+len(delta.Upstream) {
@@ -545,7 +552,9 @@ func (b nativeBuild) execute() (bool, error) {
 				return publication.update(graph.Required)
 			}
 			// Only the publisher touches delta until waitPublication returns.
-			publication = startCachePublisher(graph.Required, publicationInterval, publish)
+			publication = startCachePublisher(graph.Required, publicationInterval, func(required map[string]bool) error {
+				return publish(required, false)
+			})
 			return nil
 		}
 		reclaimIfNeeded := func() error {
@@ -560,11 +569,15 @@ func (b nativeBuild) execute() (bool, error) {
 			if err = waitPublication(); err != nil {
 				return err
 			}
-			if _, err = b.publish(graph.Required); err != nil {
+			if _, err = b.publish(graph.Required, true); err != nil {
 				return err
 			}
 			durable, err := CacheUnion(parent, delta)
 			if err != nil {
+				return err
+			}
+			// The forced publication may find outputs completed since the first refresh.
+			if _, err = index.extend(delta); err != nil {
 				return err
 			}
 			handler.SetSnapshot(durable)
@@ -580,15 +593,18 @@ func (b nativeBuild) execute() (bool, error) {
 
 		if pool != nil {
 			if graph.Static() {
-				err := pool.build(source, system, graph, missing, delta, signingKey, recipients, log, options, func() (*snapshotIndex, error) {
-					if err := publish(graph.Required); err != nil {
-						return nil, err
+				err := pool.build(source, system, graph, missing, delta, signingKey, recipients, log, options, func(force bool) (*snapshotIndex, bool, error) {
+					if err := publish(graph.Required, force); err != nil {
+						return nil, false, err
 					}
 					if err := reclaimIfNeeded(); err != nil {
-						return nil, err
+						return nil, false, err
 					}
-					return index, nil
+					return index, !b.live.dirty, nil
 				})
+				if errors.Is(err, errPoolPublication) && b.live.failed == nil {
+					b.live.failed = err
+				}
 				if err == nil && len(handler.Errors()) > 0 {
 					return errors.New("inherited cache read failed; refusing a cache fallback")
 				}
@@ -649,7 +665,7 @@ func (b nativeBuild) execute() (bool, error) {
 		failure = e
 	}
 
-	if _, e = b.publish(graph.Required); failure == nil {
+	if _, e = b.publish(graph.Required, true); failure == nil {
 		failure = e
 	}
 	if reusedPlan {
