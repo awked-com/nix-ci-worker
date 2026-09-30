@@ -167,7 +167,7 @@ func TestGenerationTagPublicationFailurePreservesPreviousHead(t *testing.T) {
 			storage := newMemoryCache()
 			const system = "aarch64-linux"
 			base := NewSnapshot(storage, cacheTestRepository)
-			base.Metadata = map[string]any{"kind": "live", "system": system, "run": "1"}
+			base.Metadata = map[string]any{"kind": "live", "system": system, "run": "1", "attempt": 1, "publication": 1}
 			previous := cachePublish(t, base, PlatformTag(system), recipients)
 			historical := generationTag(system, "2", 1, 1)
 			failTag := historical

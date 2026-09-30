@@ -37,9 +37,10 @@ func (s retentionStorage) GetManifest(repository, reference string) (Manifest, s
 func newRetentionFixture() *retentionFixture {
 	f := &retentionFixture{manifests: map[string]Manifest{}}
 	f.add(100, []string{PlatformTag("aarch64-linux")}, map[string]any{
-		"kind":   "live",
-		"run":    "100",
-		"system": "aarch64-linux",
+		"kind":    "live",
+		"run":     "100",
+		"system":  "aarch64-linux",
+		"attempt": 1, "publication": 1,
 	})
 	return f
 }
@@ -401,7 +402,7 @@ func TestRetentionRejectsUnidentifiablePoolRecords(t *testing.T) {
 		{"invalid run", []string{}, map[string]any{"kind": "pool", "run": "invalid"}},
 		{"zero run", []string{}, map[string]any{"kind": "pool", "run": "0"}},
 		{"different run", []string{"nixos-cache-pool-2-1-aarch64-linux-result-2"}, map[string]any{"kind": "pool", "run": "3"}},
-		{"different kind", []string{"nixos-cache-pool-2-1-aarch64-linux-result-2"}, map[string]any{"kind": "live", "run": "2", "system": "aarch64-linux"}},
+		{"different kind", []string{"nixos-cache-pool-2-1-aarch64-linux-result-2"}, map[string]any{"kind": "live", "run": "2", "system": "aarch64-linux", "attempt": 1, "publication": 1}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newRetentionFixture()

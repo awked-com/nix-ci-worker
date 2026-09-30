@@ -63,7 +63,9 @@ func TestRetentionRejectsMalformedAnnotationsBeforeDeletion(t *testing.T) {
 		`{`,
 		`{"kind":"pool","run":"0"}`,
 		`{"kind":"unknown","run":"1"}`,
-		`{"kind":"live","run":"1","system":"unknown"}`,
+		`{"kind":"live","run":"1","system":"unknown","attempt":1,"publication":1}`,
+		`{"kind":"live","run":"1","system":"x86_64-linux","publication":1}`,
+		`{"kind":"live","run":"1","system":"x86_64-linux","attempt":1}`,
 		`{"kind":"pool","run":"1","unexpected":true}`,
 		`{"kind":"pool","run":"1"} {}`,
 	} {

@@ -54,7 +54,7 @@ func (r retentionRecord) validate() error {
 		if _, ok := Systems[r.System]; !ok {
 			return errors.New("invalid retention platform")
 		}
-		if r.Attempt < 0 || r.Publication < 0 || (r.Publication > 0 && r.Attempt == 0) {
+		if r.Attempt < 1 || r.Publication < 1 {
 			return errors.New("invalid retention generation")
 		}
 	} else if r.System != "" || r.Attempt != 0 || r.Publication != 0 {
@@ -73,7 +73,7 @@ func managedGenerationTag(tag string, record retentionRecord) (bool, error) {
 	if !generationTagPattern.MatchString(tag) {
 		return false, nil
 	}
-	if record.Kind != "live" || record.Publication < 1 || tag != generationTag(record.System, record.Run, record.Attempt, record.Publication) {
+	if record.Kind != "live" || tag != generationTag(record.System, record.Run, record.Attempt, record.Publication) {
 		return false, errors.New("generation tag and retention metadata disagree")
 	}
 	return true, nil

@@ -79,8 +79,8 @@ func (r *registryVersions) api(path, method string) (any, error) {
 
 func TestRollingRetirementKeepsHeadsAndManualPins(t *testing.T) {
 	f := newRetentionFixture()
-	old := f.add(1, []string{}, map[string]any{"kind": "live", "run": "1", "system": "x86_64-linux"})
-	head := f.add(2, []string{PlatformTag("x86_64-linux")}, map[string]any{"kind": "live", "run": "1", "system": "x86_64-linux"})
+	old := f.add(1, []string{}, map[string]any{"kind": "live", "run": "1", "system": "x86_64-linux", "attempt": 1, "publication": 1})
+	head := f.add(2, []string{PlatformTag("x86_64-linux")}, map[string]any{"kind": "live", "run": "1", "system": "x86_64-linux", "attempt": 1, "publication": 1})
 	result := f.add(3, []string{"nixos-cache-pool-1-1-x86_64-linux-result-1"}, map[string]any{"kind": "pool", "run": "1"})
 	pinned := f.add(4, []string{"manual", "nixos-cache-pool-1-1-x86_64-linux-result-2"}, map[string]any{"kind": "pool", "run": "1"})
 	r := newVersionRetirer(f.api, retentionStorage{fixture: f}, cacheTestRepository)
@@ -138,7 +138,7 @@ func TestRollingRetirementBoundsSuccessfulTaskVersions(t *testing.T) {
 		result.Metadata = map[string]any{"kind": "pool", "run": "1", "sequence": sequence}
 		out := cachePublish(t, result, "nixos-cache-pool-1-1-x86_64-linux-result-1", recipients)
 		live := NewSnapshot(storage, cacheTestRepository)
-		live.Metadata = map[string]any{"kind": "live", "run": "1", "system": "x86_64-linux", "sequence": sequence}
+		live.Metadata = map[string]any{"kind": "live", "run": "1", "system": "x86_64-linux", "sequence": sequence, "attempt": 1, "publication": 1}
 		current := cachePublish(t, live, PlatformTag("x86_64-linux"), recipients)
 		if previous != "" {
 			if err := r.retire(previous); err != nil {
@@ -159,8 +159,8 @@ func TestRecoveryRetainsActiveHelpersAndOnlyCurrentPlatformHeads(t *testing.T) {
 	f := &retentionFixture{manifests: map[string]Manifest{}}
 	f.active = []map[string]any{{"id": "2"}}
 	for i, system := range sortedKeys(Systems) {
-		f.add(int64(10+i*2), []string{}, map[string]any{"kind": "live", "run": "2", "system": system})
-		f.add(int64(11+i*2), []string{PlatformTag(system)}, map[string]any{"kind": "live", "run": "2", "system": system})
+		f.add(int64(10+i*2), []string{}, map[string]any{"kind": "live", "run": "2", "system": system, "attempt": 1, "publication": 1})
+		f.add(int64(11+i*2), []string{PlatformTag(system)}, map[string]any{"kind": "live", "run": "2", "system": system, "attempt": 1, "publication": 1})
 	}
 	f.add(30, []string{"nixos-cache-pool-2-1-x86_64-linux-inputs-1"}, map[string]any{"kind": "pool", "run": "2"})
 	f.add(31, []string{"nixos-cache-pool-1-1-x86_64-linux-inputs-1"}, map[string]any{"kind": "pool", "run": "1"})

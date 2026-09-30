@@ -43,7 +43,7 @@ func (s *memoryCoordination) Read(prefix, previous string) (string, []byte, erro
 func TestCoordinationEvictionKeepsPublishedCache(t *testing.T) {
 	bus := poolFixture(t)
 	cache := NewSnapshot(bus.storage, bus.repository)
-	cache.Metadata = map[string]any{"kind": "live", "run": bus.run, "system": bus.system}
+	cache.Metadata = map[string]any{"kind": "live", "run": bus.run, "system": bus.system, "attempt": 1, "publication": 1}
 	if err := cacheAdd(cache, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", strings.NewReader("cache archive"), bus.recipients); err != nil {
 		t.Fatal(err)
 	}

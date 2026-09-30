@@ -107,7 +107,7 @@ func TestLivePublicationStopsAfterRetirementFailure(t *testing.T) {
 	storage := newMemoryCache()
 	const system = "aarch64-linux"
 	base := NewSnapshot(storage, cacheTestRepository)
-	base.Metadata = map[string]any{"kind": "live", "run": "1", "system": system}
+	base.Metadata = map[string]any{"kind": "live", "run": "1", "system": system, "attempt": 1, "publication": 1}
 	cachePublish(t, base, PlatformTag(system), recipients)
 	delta := NewSnapshot(storage, cacheTestRepository)
 	delta.Metadata = liveTestMetadata("2", system, 1)
