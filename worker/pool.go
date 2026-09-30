@@ -132,6 +132,12 @@ func (b *poolBus) tag(role string, runner int) string {
 	return fmt.Sprintf("nixos-cache-pool-%s-%d-%s-%s-%d", b.run, b.attempt, b.system, role, runner)
 }
 
+// The next task can publish during retirement's metadata recheck. Keeping each
+// tag on one digest prevents that publication from changing the old candidate.
+func (b *poolBus) artifactTag(role string, runner int, sequence uint64) string {
+	return fmt.Sprintf("%s-task-%d", b.tag(role, runner), sequence)
+}
+
 func (b *poolBus) prefix(role string, runner int) string {
 	// Cache keys reveal no source-derived data and cannot match another request.
 	return "nix-ci-control-v1-" + hex.EncodeToString(b.authenticate("mailbox", []byte(b.tag(role, runner)))) + "-"

@@ -107,6 +107,40 @@ func TestPoolMessagesAreEncryptedAndBoundToRequestAndRecord(t *testing.T) {
 	}
 }
 
+func TestPoolArtifactPublicationPreservesPendingRetirement(t *testing.T) {
+	for _, role := range []string{"inputs", "result"} {
+		t.Run(role, func(t *testing.T) {
+			bus := poolFixture(t)
+			storage := bus.storage.(*memoryCache)
+			old := NewSnapshot(storage, bus.repository)
+			old.Metadata = map[string]any{"kind": "pool", "run": bus.run}
+			digest := cachePublish(t, old, bus.artifactTag(role, 1, 1), bus.recipients)
+			versions := &registryVersions{storage: storage}
+			nextDigest := ""
+			api := func(path, method string) (any, error) {
+				if method == "GET" && strings.HasSuffix(path, "/versions/1") && nextDigest == "" {
+					// Publish the next assignment after inventory, before deletion
+					// rechecks the preceding assignment's tags and immutable identity.
+					next := NewSnapshot(storage, bus.repository)
+					next.Metadata = map[string]any{"kind": "pool", "run": bus.run}
+					nextDigest = cachePublish(t, next, bus.artifactTag(role, 1, 2), bus.recipients)
+				}
+				return versions.api(path, method)
+			}
+			if err := newVersionRetirer(api, storage, bus.repository).retire(digest); err != nil {
+				t.Fatal("a new assignment changed the pending retirement candidate", err)
+			}
+			if _, _, err := storage.GetManifest(bus.repository, digest); !errors.Is(err, ErrObjectNotFound) {
+				t.Fatal("preceding assignment was not retired", err)
+			}
+			_, retained, err := storage.GetManifest(bus.repository, bus.artifactTag(role, 1, 2))
+			if err != nil || nextDigest == "" || retained != nextDigest {
+				t.Fatal("retirement removed the next assignment's artifact", retained, nextDigest, err)
+			}
+		})
+	}
+}
+
 func TestPoolRejectsExpiredAndFutureLeases(t *testing.T) {
 	old := &poolMessage{Sent: time.Now().Add(-poolLease - time.Second)}
 	if poolFresh(old, poolLease) {
@@ -170,7 +204,10 @@ func TestRunnerBuildsOneTaskAndJoinsCancellation(t *testing.T) {
 			started, stopped := make(chan struct{}), make(chan struct{})
 			done := make(chan error, 1)
 			go func() {
-				done <- servePoolBuilder(ctx, bus, runner, nil, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, time.Second, time.Second}, func(ctx context.Context, task poolTask) (string, error) {
+				done <- servePoolBuilder(ctx, bus, runner, nil, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, time.Second, time.Second}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
+					if sequence != 1 {
+						t.Errorf("builder received assignment sequence %d", sequence)
+					}
 					close(started)
 					<-ctx.Done()
 					close(stopped)
@@ -212,7 +249,7 @@ func TestHelperPublishesCompletionWithoutWaitingForPoll(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{time.Second, time.Minute, time.Minute, time.Minute}, func(ctx context.Context, task poolTask) (string, error) {
+		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{time.Second, time.Minute, time.Minute, time.Minute}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
 			close(started)
 			select {
 			case <-release:
@@ -264,7 +301,10 @@ func TestHelperAcknowledgesOnceAndExitsAfterUploading(t *testing.T) {
 	var builds atomic.Int32
 	result := make(chan error, 1)
 	go func() {
-		result <- servePoolBuilder(ctx, bus, 2, []string{"big-parallel"}, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, 2 * time.Second, 2 * time.Second}, func(ctx context.Context, task poolTask) (string, error) {
+		result <- servePoolBuilder(ctx, bus, 2, []string{"big-parallel"}, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, 2 * time.Second, 2 * time.Second}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
+			if sequence != 1 {
+				t.Errorf("builder received assignment sequence %d", sequence)
+			}
 			builds.Add(1)
 			select {
 			case <-release:
@@ -318,7 +358,7 @@ func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 	started, cancelled := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, 300 * time.Millisecond, time.Second}, func(ctx context.Context, task poolTask) (string, error) {
+		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, 300 * time.Millisecond, time.Second}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
 			close(started)
 			<-ctx.Done()
 			close(cancelled)
@@ -374,7 +414,7 @@ func TestHelperCanCancelWhileFinalStatusUploadFails(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{10 * time.Millisecond, time.Millisecond, time.Second, time.Second}, func(context.Context, poolTask) (string, error) {
+		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{10 * time.Millisecond, time.Millisecond, time.Second, time.Second}, func(context.Context, uint64, poolTask) (string, error) {
 			return "", errors.New("unexpected assignment")
 		}, io.Discard)
 	}()
@@ -523,7 +563,7 @@ func TestHelperWaitsForItsFinalAssignmentBeforeDraining(t *testing.T) {
 	done := make(chan error, 1)
 	var built atomic.Int32
 	go func() {
-		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{5 * time.Millisecond, 10 * time.Millisecond, 2 * time.Second, 2 * time.Second}, func(context.Context, poolTask) (string, error) {
+		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{5 * time.Millisecond, 10 * time.Millisecond, 2 * time.Second, 2 * time.Second}, func(context.Context, uint64, poolTask) (string, error) {
 			built.Add(1)
 			return "sha256:" + strings.Repeat("a", 64), nil
 		}, io.Discard)

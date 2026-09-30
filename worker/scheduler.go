@@ -438,7 +438,7 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 		}
 		input := inputs.Load().selectPaths(required)
 		input.Metadata = map[string]any{"kind": "pool", "run": p.bus.run}
-		digest, err := input.Publish(p.bus.tag("inputs", runner), recipients)
+		digest, err := input.Publish(p.bus.artifactTag("inputs", runner, remote.Sequence), recipients)
 		if err != nil {
 			return nil, "", fmt.Errorf("%w: %w", errPoolPublication, err)
 		}

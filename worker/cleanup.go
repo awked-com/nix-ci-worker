@@ -63,7 +63,8 @@ func (r retentionRecord) validate() error {
 	return nil
 }
 
-var runTagPattern = regexp.MustCompile(`^nixos-cache-pool-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:inputs-[0-2]|result-[1-2])$`)
+// Fixed pool tags remain recoverable until their persisted versions are retired.
+var runTagPattern = regexp.MustCompile(`^nixos-cache-pool-([0-9]+)-[1-9][0-9]*-(?:x86_64-linux|aarch64-linux|aarch64-darwin)-(?:inputs-[0-2]|result-[1-2])(?:-task-([1-9][0-9]*))?$`)
 
 var generationTagPattern = regexp.MustCompile(`^nixos-cache-(x86_64-linux|aarch64-linux|aarch64-darwin)-run-([0-9]+)-attempt-([1-9][0-9]*)-publication-([1-9][0-9]*)$`)
 
@@ -428,6 +429,11 @@ func TagRun(tag string) string {
 	match := runTagPattern.FindStringSubmatch(tag)
 	if match == nil {
 		return ""
+	}
+	if match[2] != "" {
+		if _, err := strconv.ParseUint(match[2], 10, 64); err != nil {
+			return ""
+		}
 	}
 
 	return match[1]

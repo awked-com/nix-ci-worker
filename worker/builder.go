@@ -24,7 +24,7 @@ type poolBuildResult struct {
 	err      error
 }
 
-func servePoolBuilder(ctx context.Context, bus *poolBus, runner int, features []string, timing poolTiming, execute func(context.Context, poolTask) (string, error), log io.Writer) error {
+func servePoolBuilder(ctx context.Context, bus *poolBus, runner int, features []string, timing poolTiming, execute func(context.Context, uint64, poolTask) (string, error), log io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	instance := poolNonce()
 	status := poolMessage{Cores: runtime.NumCPU(), Instance: instance, State: "ready", Features: features}
@@ -86,10 +86,10 @@ func servePoolBuilder(ctx context.Context, bus *poolBus, runner int, features []
 				lastPublished = time.Time{}
 				result := make(chan poolBuildResult, 1)
 				running = result
-				go func(task poolTask) {
-					snapshot, err := execute(ctx, task)
+				go func(sequence uint64, task poolTask) {
+					snapshot, err := execute(ctx, sequence, task)
 					result <- poolBuildResult{snapshot, err}
-				}(*assignment.Task)
+				}(assignment.Sequence, *assignment.Task)
 			}
 		}
 		select {
@@ -213,7 +213,7 @@ func buildPoolDerivation(ctx context.Context, source, system, spec string, cores
 	return nil
 }
 
-func executePoolBuild(ctx context.Context, bus *poolBus, source string, runner int, task poolTask, upstream UpstreamCollector, log io.Writer) (string, error) {
+func executePoolBuild(ctx context.Context, bus *poolBus, source string, runner int, sequence uint64, task poolTask, upstream UpstreamCollector, log io.Writer) (string, error) {
 	started := time.Now()
 	if task.Cores < 1 || task.Cores > runtime.NumCPU() {
 		return "", errors.New("invalid builder CPU allocation")
@@ -278,7 +278,7 @@ func executePoolBuild(ctx context.Context, bus *poolBus, source string, runner i
 	}
 	result = index.selectPaths(required)
 	result.Metadata = map[string]any{"kind": "pool", "run": bus.run}
-	digest, err := result.Publish(bus.tag("result", runner), bus.recipients)
+	digest, err := result.Publish(bus.artifactTag("result", runner, sequence), bus.recipients)
 	if err == nil {
 		fmt.Fprintf(log, "Builder result published: %s/%d (%.1fs)\n", bus.system, runner, time.Since(started).Seconds())
 	}
@@ -298,8 +298,8 @@ func RunBuilder(source string, runner int, bus *poolBus, log io.Writer) error {
 	defer upstream.Close()
 	log = &buildLog{Writer: log}
 	fmt.Fprintf(log, "Ready runner: %s/%d (%d CPUs)\n", bus.system, runner, runtime.NumCPU())
-	err = servePoolBuilder(context.Background(), bus, runner, features, productionPoolTiming, func(ctx context.Context, task poolTask) (string, error) {
-		return executePoolBuild(ctx, bus, source, runner, task, upstream, log)
+	err = servePoolBuilder(context.Background(), bus, runner, features, productionPoolTiming, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
+		return executePoolBuild(ctx, bus, source, runner, sequence, task, upstream, log)
 	}, log)
 	if err != nil {
 		fmt.Fprintf(log, "Runner stopped: %s/%d\n", bus.system, runner)

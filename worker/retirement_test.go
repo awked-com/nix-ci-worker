@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/url"
@@ -142,6 +143,120 @@ func TestRollingRetirementScansUntilMissingDigestsAreResolved(t *testing.T) {
 			}
 			if err := newVersionRetirer(api, retentionStorage{fixture: f}, cacheTestRepository).retire(first, missing); err == nil || len(f.deleted) != 0 {
 				t.Fatal("incomplete inventory allowed a partial retirement", err, f.deleted)
+			}
+		})
+	}
+}
+
+func TestRollingRetirementHandlesConcurrentInventoryPages(t *testing.T) {
+	for _, change := range []string{"overlap", "digest", "manual pin"} {
+		t.Run(change, func(t *testing.T) {
+			f := &retentionFixture{manifests: map[string]Manifest{}}
+			var target string
+			for id := 1; id <= 150; id++ {
+				digest := f.add(int64(id), []string{}, map[string]any{"kind": "pool", "run": "1"})
+				if id == 120 {
+					target = digest
+				}
+			}
+			api := func(path, method string) (any, error) {
+				parsed, _ := url.Parse(path)
+				if parsed.Query().Get("page") == "2" {
+					f.add(151, []string{}, map[string]any{"kind": "pool", "run": "1"})
+					f.versions = append([]Version{f.versions[150]}, f.versions[:150]...)
+					if change == "digest" {
+						f.versions[100].Name = f.versions[101].Name
+					}
+					if change == "manual pin" {
+						f.versions[120].Metadata.Container.Tags = []string{"manual"}
+					}
+				}
+				return f.api(path, method)
+			}
+			err := newVersionRetirer(api, retentionStorage{fixture: f}, cacheTestRepository).retire(target)
+			if change == "digest" {
+				if err == nil || len(f.deleted) != 0 {
+					t.Fatal("changed version identity allowed retirement", err, f.deleted)
+				}
+			} else if err != nil || change == "manual pin" && len(f.deleted) != 0 || change == "overlap" && !slices.Equal(f.deleted, []int64{120}) {
+				t.Fatal("concurrent inventory did not preserve exact retirement and pins", err, f.deleted)
+			}
+		})
+	}
+}
+
+func TestRollingRetirementRescansSkippedVersionsAndRefreshesPins(t *testing.T) {
+	for _, pin := range []bool{false, true} {
+		t.Run(strconv.FormatBool(pin), func(t *testing.T) {
+			f := &retentionFixture{manifests: map[string]Manifest{}}
+			digests := []string{}
+			for id := 1; id <= 250; id++ {
+				digest := f.add(int64(id), []string{}, map[string]any{"kind": "pool", "run": "1"})
+				if id == 50 || id == 101 {
+					digests = append(digests, digest)
+				}
+			}
+			shifted := false
+			api := func(path, method string) (any, error) {
+				parsed, _ := url.Parse(path)
+				page := parsed.Query().Get("page")
+				if page == "2" && !shifted {
+					// Deletion shifts the unseen target from page two into page one.
+					f.versions = f.versions[1:]
+					shifted = true
+				} else if page == "1" && shifted && pin {
+					f.versions[48].Metadata.Container.Tags = []string{"manual"}
+				}
+				return f.api(path, method)
+			}
+			if err := newVersionRetirer(api, retentionStorage{fixture: f}, cacheTestRepository).retire(digests...); err != nil {
+				t.Fatal(err)
+			}
+			want := []int64{50, 101}
+			if pin {
+				want = []int64{101}
+			}
+			if !slices.Equal(f.deleted, want) {
+				t.Fatal("fresh inventory lost a skipped version or manual pin", f.deleted)
+			}
+		})
+	}
+}
+
+func TestRollingRetirementDoesNotRescanAlreadyDeletedVersions(t *testing.T) {
+	f := newRetentionFixture()
+	digest := f.add(1, []string{}, map[string]any{"kind": "pool", "run": "1"})
+	f.versions = f.versions[:1]
+	delete(f.manifests, digest)
+	api := func(path, method string) (any, error) {
+		if strings.Contains(path, "page=") && f.inventoryCalls > 0 {
+			return nil, errors.New("already deleted version caused another inventory scan")
+		}
+		return f.api(path, method)
+	}
+	if err := newVersionRetirer(api, retentionStorage{fixture: f}, cacheTestRepository).retire(digest); err != nil || len(f.deleted) != 0 {
+		t.Fatal("already deleted version was not accepted", err, f.deleted)
+	}
+}
+
+func TestRollingRetirementReportsSafeFailurePhase(t *testing.T) {
+	for _, phase := range []string{"reading retirement inventory", "rechecking retirement candidate", "deleting retirement version"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newRetentionFixture()
+			digest := f.add(1, []string{}, map[string]any{"kind": "pool", "run": "1"})
+			api := func(path, method string) (any, error) {
+				if phase == "reading retirement inventory" && strings.Contains(path, "page=") ||
+					phase == "rechecking retirement candidate" && strings.HasSuffix(path, "/versions/1") && method == "GET" ||
+					phase == "deleting retirement version" && method == "DELETE" {
+					return nil, fmt.Errorf("private diagnostic: %w", githubResponseError(method, 502, []byte(`{"message":"private response"}`)))
+				}
+				return f.api(path, method)
+			}
+			var log bytes.Buffer
+			r := newVersionRetirer(api, retentionStorage{fixture: f}, cacheTestRepository)
+			r.log = &log
+			if err := r.retire(digest); err == nil || !strings.Contains(log.String(), phase) || !strings.Contains(log.String(), "HTTP 502") || strings.Contains(log.String(), "private") || strings.Contains(log.String(), digest) {
+				t.Fatal("retirement failure was missing or unsafe", &log)
 			}
 		})
 	}

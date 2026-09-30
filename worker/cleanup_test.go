@@ -333,11 +333,17 @@ func TestPruneRechecksCacheVersionsBeforeDeletion(t *testing.T) {
 
 func TestCleanupTagRecognition(t *testing.T) {
 	for tag, want := range map[string]string{
-		"nixos-cache-pool-12-1-aarch64-darwin-inputs-0": "12",
-		"nixos-cache-pool-12-1-aarch64-darwin-inputs-1": "12",
-		"nixos-cache-pool-12-1-aarch64-darwin-inputs-2": "12",
-		"nixos-cache-pool-12-1-aarch64-darwin-result-2": "12",
-		"nixos-cache-pool-12-1-aarch64-darwin-result-3": "",
+		"nixos-cache-pool-12-1-aarch64-darwin-inputs-0":                           "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-inputs-1":                           "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-inputs-2":                           "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-result-2":                           "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-result-3":                           "",
+		"nixos-cache-pool-12-1-aarch64-darwin-inputs-1-task-1":                    "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-result-2-task-18446744073709551615": "12",
+		"nixos-cache-pool-12-1-aarch64-darwin-result-2-task-18446744073709551616": "",
+		"nixos-cache-pool-12-1-aarch64-darwin-result-2-task-0":                    "",
+		"nixos-cache-pool-12-1-aarch64-darwin-result-2-task-1.5":                  "",
+		"nixos-cache-pool-12-1-aarch64-darwin-result-2-task-1-extra":              "",
 		"manual": "",
 	} {
 		if got := TagRun(tag); got != want {

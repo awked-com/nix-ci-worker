@@ -27,8 +27,20 @@ func newVersionRetirer(api GitHubAPI, storage Storage, repository string) *versi
 	return &versionRetirer{api: api, storage: storage, repository: repository}
 }
 
-func (r *versionRetirer) retire(digests ...string) error {
+func (r *versionRetirer) retire(digests ...string) (err error) {
 	started := time.Now()
+	phase := "validating retirement request"
+	defer func() {
+		if err == nil || r.log == nil {
+			return
+		}
+		fmt.Fprintf(r.log, "Retention failed while %s", phase)
+		var status *githubStatusError
+		if errors.As(err, &status) {
+			fmt.Fprintf(r.log, ": %s", status)
+		}
+		fmt.Fprintln(r.log)
+	}()
 	wanted := map[string]bool{}
 	for _, digest := range digests {
 		if !digestPattern.MatchString(digest) {
@@ -44,27 +56,41 @@ func (r *versionRetirer) retire(digests ...string) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	versions, err := r.inventory(wanted)
-	if err != nil {
-		return err
-	}
-	candidates := []Version{}
-	for _, version := range versions {
-		if wanted[version.Name] {
-			candidates = append(candidates, version)
-			delete(wanted, version.Name)
-		}
-	}
-	for digest := range wanted {
-		_, _, err := r.storage.GetManifest(r.repository, digest)
-		if errors.Is(err, ErrObjectNotFound) {
-			continue
-		}
+	var candidates []Version
+	for attempt := range 3 {
+		phase = "reading retirement inventory"
+		versions, err := r.inventory(wanted)
 		if err != nil {
 			return err
 		}
-		return errors.New("retirement version is missing from package inventory")
+		remaining := maps.Clone(wanted)
+		for _, version := range versions {
+			delete(remaining, version.Name)
+		}
+		phase = "resolving missing retirement versions"
+		for digest := range remaining {
+			_, _, err := r.storage.GetManifest(r.repository, digest)
+			if errors.Is(err, ErrObjectNotFound) {
+				delete(remaining, digest)
+				delete(wanted, digest)
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if len(remaining) == 0 {
+			candidates = versions
+			break
+		}
+		if attempt == 2 {
+			return errors.New("retirement version is missing from package inventory")
+		}
+		// Offset pagination can skip a version when another runner deletes an
+		// earlier row. Retry a fresh inventory only for artifacts still present.
+		time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
 	}
+	phase = "validating retirement manifests"
 	inspected, err := inspectVersions(r.storage, r.repository, candidates, nil)
 	if err != nil {
 		return err
@@ -94,6 +120,7 @@ func (r *versionRetirer) retire(digests ...string) error {
 	}
 	deleted := 0
 	for _, candidate := range remove {
+		phase = "rechecking retirement candidate"
 		path := r.endpoint + "/" + strconv.FormatInt(candidate.ID, 10)
 		value, err := r.api(path, "GET")
 		if errors.Is(err, ErrObjectNotFound) {
@@ -109,6 +136,7 @@ func (r *versionRetirer) retire(digests ...string) error {
 		if Fingerprint([]Version{current}) != Fingerprint([]Version{candidate}) {
 			return errors.New("retirement candidate changed")
 		}
+		phase = "deleting retirement version"
 		removed, err := deleteVersion(r.api, path, r.log)
 		if err != nil && !errors.Is(err, ErrObjectNotFound) {
 			return err
@@ -136,7 +164,7 @@ func (r *versionRetirer) inventory(wanted map[string]bool) ([]Version, error) {
 	// decision; download-protected history need not delay each publication.
 	remaining := maps.Clone(wanted)
 	versions := []Version{}
-	seen := map[int64]bool{}
+	seen := map[int64]string{}
 	for page := 1; ; page++ {
 		value, err := r.api(fmt.Sprintf("%s?per_page=100&page=%d", r.endpoint, page), "GET")
 		if page == 1 && errors.Is(err, ErrObjectNotFound) {
@@ -149,19 +177,26 @@ func (r *versionRetirer) inventory(wanted map[string]bool) ([]Version, error) {
 		if err != nil {
 			return nil, err
 		}
+		progress := false
 		for _, value := range batch {
 			version, err := decodeVersion(value)
 			if err != nil {
 				return nil, err
 			}
-			if seen[version.ID] {
-				return nil, errors.New("package inventory changed or repeated a page")
+			if digest, exists := seen[version.ID]; exists {
+				if digest != version.Name {
+					return nil, errors.New("package version ID changed digest")
+				}
+				continue
 			}
-			seen[version.ID] = true
+			seen[version.ID], progress = version.Name, true
 			if remaining[version.Name] {
 				versions = append(versions, version)
 				delete(remaining, version.Name)
 			}
+		}
+		if !progress && len(batch) > 0 {
+			return nil, errors.New("package inventory repeated a page without progress")
 		}
 		if len(remaining) == 0 || len(batch) < 100 {
 			return versions, nil

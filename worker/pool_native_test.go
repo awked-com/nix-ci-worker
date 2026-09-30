@@ -57,7 +57,7 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 	if _, err = PublishStore(source, graph.Required, inputs, empty, Secret{Data: signing}, recipients, log, knownUpstream{}); err != nil {
 		t.Fatalf("publish input: %v\n%s", err, &diagnostics)
 	}
-	digest, err := inputs.Publish(bus.tag("inputs", 0), recipients)
+	digest, err := inputs.Publish(bus.artifactTag("inputs", 2, 1), recipients)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,10 +120,22 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := poolTask{Cores: runtime.NumCPU(), Installable: drv + "^out", BuildInputs: buildInputs, Inputs: digest, PublicKey: public, Outputs: []string{output}}
-	resultDigest, err := executePoolBuild(context.Background(), bus, source, 2, task, knownUpstream{}, log)
+	resultDigest, err := executePoolBuild(context.Background(), bus, source, 2, 1, task, knownUpstream{}, log)
 	if err != nil {
 		t.Fatalf("helper build: %v\n%s", err, &diagnostics)
 	}
+	t.Run("consecutive results remain reachable", func(t *testing.T) {
+		next, err := executePoolBuild(context.Background(), bus, source, 2, 2, task, knownUpstream{}, log)
+		if err != nil {
+			t.Fatalf("next helper build: %v\n%s", err, &diagnostics)
+		}
+		for sequence, expected := range map[uint64]string{1: resultDigest, 2: next} {
+			_, retained, err := storage.GetManifest(bus.repository, bus.artifactTag("result", 2, sequence))
+			if err != nil || retained != expected {
+				t.Fatal("helper result lost its assignment identity", sequence, retained, expected, err)
+			}
+		}
+	})
 	result, err := LoadSnapshot(storage, bus.repository, resultDigest, identity)
 	if err != nil {
 		t.Fatal(err)
@@ -244,8 +256,15 @@ func testNativePoolDependencyGraph(t *testing.T, failRetirement bool) {
 	helpers := make(chan error, 2)
 	for runner := 1; runner < RunnersPerSystem; runner++ {
 		go func() {
-			helpers <- servePoolBuilder(ctx, bus, runner, []string{"big-parallel"}, timing, func(ctx context.Context, task poolTask) (string, error) {
-				return executePoolBuild(ctx, bus, source, runner, task, knownUpstream{}, log)
+			helpers <- servePoolBuilder(ctx, bus, runner, []string{"big-parallel"}, timing, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
+				_, input, err := storage.GetManifest(bus.repository, bus.artifactTag("inputs", runner, sequence))
+				if err != nil {
+					return "", err
+				}
+				if input != task.Inputs {
+					return "", errors.New("helper input digest does not match its assignment sequence")
+				}
+				return executePoolBuild(ctx, bus, source, runner, sequence, task, knownUpstream{}, log)
 			}, log)
 		}()
 	}
