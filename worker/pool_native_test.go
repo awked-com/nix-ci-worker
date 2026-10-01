@@ -186,15 +186,6 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 
 func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 	nativeEnabled(t)
-	for _, failure := range []bool{false, true} {
-		t.Run(fmt.Sprintf("retirement-failure=%v", failure), func(t *testing.T) {
-			testNativePoolDependencyGraph(t, failure)
-		})
-	}
-}
-
-func testNativePoolDependencyGraph(t *testing.T, failRetirement bool) {
-	t.Helper()
 	t.Setenv("GITHUB_ACTIONS", "")
 	system, err := NativeSystem()
 	if err != nil {
@@ -213,38 +204,6 @@ func testNativePoolDependencyGraph(t *testing.T, failRetirement bool) {
 	bus, err := newPoolBus(storage, newMemoryCoordination(), cacheTestRepository, "456", system, 1, identity, recipients, "native-pool")
 	if err != nil {
 		t.Fatal(err)
-	}
-	versions := &registryVersions{storage: storage}
-	retirer := newVersionRetirer(versions.api, storage, bus.repository)
-	retirementError := errors.New("helper retirement unavailable")
-	failedHead := ""
-	failedArtifacts := []string{}
-	bus.retire = func(digests ...string) error {
-		head, err := LoadSnapshot(storage, bus.repository, PlatformTag(system), identity)
-		if err != nil {
-			return fmt.Errorf("helper retirement before durable head: %w", err)
-		}
-		for _, digest := range digests {
-			artifact, err := LoadSnapshot(storage, bus.repository, digest, identity)
-			if err != nil {
-				return err
-			}
-			for _, text := range artifact.Narinfos {
-				fields, err := NarinfoFields(text)
-				if err != nil {
-					return err
-				}
-				if !head.Contains(fields["StorePath"]) {
-					return errors.New("helper artifact retired before its paths reached the durable head")
-				}
-			}
-		}
-		if failRetirement && failedHead == "" {
-			failedHead = head.Digest
-			failedArtifacts = append(failedArtifacts, digests...)
-			return retirementError
-		}
-		return retirer.retire(digests...)
 	}
 	timing := poolTiming{20 * time.Millisecond, 50 * time.Millisecond, 10 * time.Second, 10 * time.Second}
 	var output bytes.Buffer
@@ -286,13 +245,9 @@ func testNativePoolDependencyGraph(t *testing.T, failRetirement bool) {
 		source: source, system: system, run: bus.run, attempt: bus.attempt,
 		parent: parent, delta: delta, log: log, upstream: knownUpstream{}, pool: p,
 		secrets: buildSecrets{identity: identity, recipients: recipients, signingKey: Secret{Data: signing}},
-		live:    &livePublisher{system: system, run: bus.run, attempt: bus.attempt, recipients: recipients, retire: retirer.retire, log: log},
+		live:    &livePublisher{system: system, run: bus.run, attempt: bus.attempt, recipients: recipients, log: log},
 	}).execute()
-	if failRetirement {
-		if success || !errors.Is(err, retirementError) {
-			t.Fatalf("retirement failure was lost: success=%v err=%v\n%s", success, err, &output)
-		}
-	} else if err != nil || !success {
+	if err != nil || !success {
 		t.Fatalf("pool build: success=%v err=%v\n%s", success, err, &output)
 	}
 	for range 2 {
@@ -311,18 +266,6 @@ func testNativePoolDependencyGraph(t *testing.T, failRetirement bool) {
 			t.Fatal("helper did not build", runner, status, err)
 		}
 	}
-	if failRetirement {
-		head, err := LoadSnapshot(storage, bus.repository, PlatformTag(system), identity)
-		if err != nil || failedHead == "" || head.Digest != failedHead {
-			t.Fatal("head advanced after a helper cleanup failure", failedHead, head, err)
-		}
-		for _, digest := range failedArtifacts {
-			if _, _, err := storage.GetManifest(bus.repository, digest); err != nil {
-				t.Fatal("helper artifact was removed after cleanup failed", digest, err)
-			}
-		}
-		return
-	}
 	saved, err := LoadResult(storage, bus.repository, bus.run, system, bus.attempt, identity)
 	if err != nil {
 		t.Fatal(err)
@@ -337,9 +280,22 @@ func testNativePoolDependencyGraph(t *testing.T, failRetirement bool) {
 	if err = head.RequireClosed(); err != nil {
 		t.Fatal(err)
 	}
+	for runner := 1; runner < RunnersPerSystem; runner++ {
+		status, err := bus.read("status", runner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for sequence := uint64(1); sequence <= status.Sequence; sequence++ {
+			for _, role := range []string{"inputs", "result"} {
+				if _, err := LoadSnapshot(storage, bus.repository, bus.artifactTag(role, runner, sequence), identity); err != nil {
+					t.Fatal("historical helper snapshot lost", runner, sequence, role, err)
+				}
+			}
+		}
+	}
 	historicalTag := generationTag(system, bus.run, bus.attempt, Int(head.Metadata["publication"]))
-	if len(storage.manifests) != 1 || len(storage.tags) != 2 || storage.tags[historicalTag] != head.Digest || storage.tags[PlatformTag(system)] != head.Digest {
-		t.Fatal("completed helper artifacts survived durable publication", len(storage.manifests), storage.tags)
+	if storage.tags[historicalTag] != head.Digest || storage.tags[PlatformTag(system)] != head.Digest {
+		t.Fatal("durable publication lost its historical tag", len(storage.manifests), storage.tags)
 	}
 }
 

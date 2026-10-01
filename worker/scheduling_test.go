@@ -273,14 +273,14 @@ func TestPoolForcesPendingHeadBeforeReturning(t *testing.T) {
 			publicationError := errors.New("head upload failed")
 			err = pool.build("", pool.bus.system, &Plan{Derivations: map[string]Derivation{}}, nil, delta,
 				pool.bus.signingKey(0), pool.bus.recipients, io.Discard, nil,
-				func(force bool) (*snapshotIndex, bool, error) {
+				func(force bool) (*snapshotIndex, error) {
 					if force {
 						forced = true
 						if fail {
-							return nil, false, publicationError
+							return nil, publicationError
 						}
 					}
-					return index, force, nil
+					return index, nil
 				})
 			if !forced || fail && (!errors.Is(err, publicationError) || !errors.Is(err, errPoolPublication)) || !fail && err != nil {
 				t.Fatal("pool returned without a successful final head or its publication error", forced, err)

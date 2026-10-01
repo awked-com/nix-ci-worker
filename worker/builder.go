@@ -40,9 +40,19 @@ func servePoolBuilder(ctx context.Context, bus *poolBus, runner int, features []
 		}
 	}()
 	stopping := false
+	var coordinator *poolMessage
+	var nextLeaseRead time.Time
 	for {
-		coordinator, err := bus.read("coordinator", 0)
-		if err == nil && poolFresh(coordinator, timing.lease) {
+		// Busy builders need lease checks, but have no assignment to receive.
+		// Idle builders poll promptly so finish and new-work signals stay responsive.
+		if running == nil || !time.Now().Before(nextLeaseRead) || !poolFresh(coordinator, timing.lease) {
+			message, err := bus.read("coordinator", 0)
+			if err == nil {
+				coordinator = message
+			}
+			nextLeaseRead = time.Now().Add(max(timing.poll, timing.heartbeat/2))
+		}
+		if poolFresh(coordinator, timing.lease) {
 			if status.Session == "" {
 				status.Session = coordinator.Session
 			}

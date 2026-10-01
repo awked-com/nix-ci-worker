@@ -600,3 +600,68 @@ func TestCatalogPlatformUnion(t *testing.T) {
 		t.Fatalf("unexpected platform reads: %d views, %d manifests", len(reader.views), measured.manifests)
 	}
 }
+
+func TestCatalogIndependentNodesFetchConcurrently(t *testing.T) {
+	identity, recipients := cacheKeys(t)
+	storage := newMemoryCache()
+	snapshot := catalogFixture(storage, 3000)
+	cachePublish(t, snapshot, "catalog", recipients)
+	measured := &measuredCatalogStorage{Storage: storage, reads: map[string]int{}}
+	blocked := &blockedCatalogStorage{Storage: measured, blobs: map[string]bool{}, entered: make(chan struct{}, 4), release: make(chan struct{})}
+	reader := NewSnapshotReader(blocked, cacheTestRepository, "catalog", identity, nil)
+	if _, err := reader.Current(""); err != nil {
+		t.Fatal(err)
+	}
+	view := reader.views["catalog"]
+	root, err := view.node(view.root.Index, "", true, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	prefixes := map[string]bool{}
+	for _, name := range sortedKeys(snapshot.Narinfos) {
+		prefix := contentDigest([]byte(name))[7:8]
+		child, exists := root.Children[prefix]
+		if exists && !prefixes[prefix] {
+			prefixes[prefix] = true
+			blocked.blobs[child.Digest] = true
+			names = append(names, name)
+			if len(names) == 2 {
+				break
+			}
+		}
+	}
+	if len(names) != 2 {
+		t.Fatal("fixture needs independent catalog branches")
+	}
+	var release sync.Once
+	defer release.Do(func() { close(blocked.release) })
+	results := make(chan error, 3)
+	for _, name := range []string{names[0], names[0], names[1]} {
+		go func() {
+			snapshot, err := reader.Current(name)
+			if err == nil && !snapshot.HasFile(name) {
+				err = errors.New("lookup omitted record")
+			}
+			results <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-blocked.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("independent lookup waited behind a blocked shard")
+		}
+	}
+	release.Do(func() { close(blocked.release) })
+	for range 3 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for digest := range blocked.blobs {
+		if measured.reads[digest] != 1 {
+			t.Fatal("duplicate lookup fetched the same shard again", measured.reads[digest])
+		}
+	}
+}

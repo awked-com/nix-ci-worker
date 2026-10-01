@@ -593,14 +593,14 @@ func (b nativeBuild) execute() (bool, error) {
 
 		if pool != nil {
 			if graph.Static() {
-				err := pool.build(source, system, graph, missing, delta, signingKey, recipients, log, options, func(force bool) (*snapshotIndex, bool, error) {
+				err := pool.build(source, system, graph, missing, delta, signingKey, recipients, log, options, func(force bool) (*snapshotIndex, error) {
 					if err := publish(graph.Required, force); err != nil {
-						return nil, false, err
+						return nil, err
 					}
 					if err := reclaimIfNeeded(); err != nil {
-						return nil, false, err
+						return nil, err
 					}
-					return index, !b.live.dirty, nil
+					return index, nil
 				})
 				if errors.Is(err, errPoolPublication) && b.live.failed == nil {
 					b.live.failed = err
@@ -712,6 +712,11 @@ func (b nativeBuild) execute() (bool, error) {
 		delta.Metadata[k] = v
 	}
 
+	if pool != nil {
+		if control, ok := pool.bus.control.(*actionsCache); ok {
+			delta.Metadata["coordination"] = control.metrics()
+		}
+	}
 	if e = b.live.publish(delta, true); e != nil {
 		return false, e
 	}
@@ -764,9 +769,6 @@ func RunWorker(log io.Writer) error {
 		return errors.New("worker repository mismatch")
 	}
 
-	api := NewGitHub(token)
-	retirer := newVersionRetirer(api, storage, repository)
-	retirer.log = log
 	workerRecipients, e := IdentityRecipients(identity)
 	if e != nil {
 		return e
@@ -837,10 +839,6 @@ func RunWorker(log io.Writer) error {
 		if e != nil || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(strings.TrimSpace(string(revision))) {
 			return errors.New("resolve admitted source commit")
 		}
-		if _, e = Prune(api, storage, repository, log); e != nil {
-			return e
-		}
-
 		_, e = fmt.Fprintf(f, "matrix=%s\nhelpers=%s\nrevision=%s\n", encoded, helperJSON, strings.TrimSpace(string(revision)))
 		if e != nil {
 			return e
@@ -863,14 +861,13 @@ func RunWorker(log io.Writer) error {
 	if submitted.Selection != nil {
 		delta.Metadata["selection"] = submitted.Selection
 	}
-	bus.retire = retirer.retire
 	pool := StartBuildPool(bus, log)
 	defer pool.Close()
 	success, e := (nativeBuild{
 		source: source, system: system, run: run, attempt: attempt,
 		parent: parent, delta: delta, pool: pool, log: log,
 		live: &livePublisher{snapshot: parent, system: system, run: run, attempt: attempt,
-			recipients: recipients, retire: retirer.retire, log: log},
+			recipients: recipients, log: log},
 		secrets: buildSecrets{identity: identity, recipients: recipients, signingKey: signingKey},
 	}).execute()
 	if e != nil {

@@ -12,7 +12,7 @@ import (
 
 func PlatformTag(system string) string { return "nixos-cache-" + system }
 
-// Live generations remain identifiable if GitHub refuses their deletion.
+// Historical tags keep every published generation available.
 func generationTag(system, run string, attempt, publication int) string {
 	return fmt.Sprintf("%s-run-%s-attempt-%d-publication-%d", PlatformTag(system), run, attempt, publication)
 }
@@ -121,7 +121,6 @@ type livePublisher struct {
 	run           string
 	attempt       int
 	recipients    Secret
-	retire        func(...string) error
 	log           io.Writer
 	published     int
 	failed        error
@@ -130,7 +129,7 @@ type livePublisher struct {
 }
 
 // Callers keep pending outputs locally and retain helper manifests until a
-// head update succeeds. Retirement and disk reclamation require a forced flush.
+// head update succeeds. Disk reclamation requires a forced flush.
 func (p *livePublisher) flush(delta *Snapshot, force bool) (bool, error) {
 	if p.failed != nil {
 		return false, p.failed
@@ -184,12 +183,11 @@ func (p *livePublisher) update(delta *Snapshot, terminal bool) error {
 	p.snapshot.Metadata["run"] = p.run
 	p.snapshot.Metadata["attempt"] = p.attempt
 	p.snapshot.Metadata["publication"] = p.published + 1
-	previous := p.snapshot.Digest
 	if _, err := p.snapshot.Publish(generationTag(p.system, p.run, p.attempt, p.published+1), p.recipients); err != nil {
 		return err
 	}
 	// Both tags must address the same manifest. Publishing the historical tag
-	// first ensures a failed head update leaves an identifiable orphan.
+	// first preserves the generation even if advancing the head fails.
 	digest, err := p.snapshot.Storage.PutManifest(p.snapshot.Repository, PlatformTag(p.system), p.snapshot.Manifest)
 	if err != nil {
 		return err
@@ -200,9 +198,6 @@ func (p *livePublisher) update(delta *Snapshot, terminal bool) error {
 	p.published++
 	if p.log != nil {
 		fmt.Fprintf(p.log, "Cache published: %s (%d cached paths, %.1fs)\n", p.system, len(p.snapshot.Narinfos), time.Since(started).Seconds())
-	}
-	if p.retire != nil && previous != "" && previous != p.snapshot.Digest {
-		return p.retire(previous)
 	}
 	return nil
 }

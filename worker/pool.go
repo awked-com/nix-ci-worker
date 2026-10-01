@@ -88,7 +88,6 @@ type poolBus struct {
 	controlRecipients       Secret
 	storage                 Storage
 	control                 coordinationStore
-	retire                  func(...string) error
 	repository, run, system string
 	attempt                 int
 	identity, recipients    Secret
@@ -132,8 +131,7 @@ func (b *poolBus) tag(role string, runner int) string {
 	return fmt.Sprintf("nixos-cache-pool-%s-%d-%s-%s-%d", b.run, b.attempt, b.system, role, runner)
 }
 
-// The next task can publish during retirement's metadata recheck. Keeping each
-// tag on one digest prevents that publication from changing the old candidate.
+// Each assignment retains its own immutable input and result snapshots.
 func (b *poolBus) artifactTag(role string, runner int, sequence uint64) string {
 	return fmt.Sprintf("%s-task-%d", b.tag(role, runner), sequence)
 }

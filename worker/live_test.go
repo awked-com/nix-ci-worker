@@ -44,10 +44,9 @@ func collectTestBlobs(t *testing.T, storage *memoryCache) {
 func TestLivePublicationRetainsHistoricalOutputsAndResults(t *testing.T) {
 	identity, recipients := cacheKeys(t)
 	storage := newMemoryCache()
-	versions := &registryVersions{storage: storage}
-	retirer := newVersionRetirer(versions.api, storage, cacheTestRepository)
 	const system = "x86_64-linux"
 	paths := []string{}
+	history := map[string]string{}
 	for index, char := range "0123456789ab" {
 		run := fmt.Sprint(index + 1)
 		base, err := loadPlatform(storage, cacheTestRepository, system, identity)
@@ -61,7 +60,7 @@ func TestLivePublicationRetainsHistoricalOutputsAndResults(t *testing.T) {
 		if err := cacheAdd(delta, name, strings.NewReader("archive "+run), recipients); err != nil {
 			t.Fatal(err)
 		}
-		publisher := &livePublisher{snapshot: base, system: system, run: run, attempt: 1, recipients: recipients, retire: retirer.retire}
+		publisher := &livePublisher{snapshot: base, system: system, run: run, attempt: 1, recipients: recipients}
 		if err := publisher.publish(delta, false); err != nil {
 			t.Fatal(err)
 		}
@@ -78,6 +77,14 @@ func TestLivePublicationRetainsHistoricalOutputsAndResults(t *testing.T) {
 		}
 		if err := publisher.publish(delta, true); err != nil {
 			t.Fatal(err)
+		}
+		history[generationTag(system, run, 1, 1)] = published.Digest
+		history[generationTag(system, run, 1, 2)] = publisher.snapshot.Digest
+		for tag, digest := range history {
+			old, err := LoadSnapshot(storage, cacheTestRepository, tag, identity)
+			if err != nil || old.Digest != digest {
+				t.Fatal("historical generation changed", tag, err)
+			}
 		}
 		collectTestBlobs(t, storage)
 		paths = append(paths, path)
@@ -97,35 +104,9 @@ func TestLivePublicationRetainsHistoricalOutputsAndResults(t *testing.T) {
 		if got := string(cacheRead(t, published, name, identity)); got != "archive "+run {
 			t.Fatal("old reader lost its archive", got)
 		}
-		if len(storage.manifests) != 1 || len(storage.tags) != 2 {
-			t.Fatal("versions grew with run count", len(storage.manifests), len(storage.tags))
+		if len(storage.manifests) != 2*(index+1) || len(storage.tags) != 2*(index+1)+1 {
+			t.Fatal("historical generations were lost", len(storage.manifests), len(storage.tags))
 		}
-	}
-}
-
-func TestLivePublicationStopsAfterRetirementFailure(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	const system = "aarch64-linux"
-	base := NewSnapshot(storage, cacheTestRepository)
-	base.Metadata = map[string]any{"kind": "live", "run": "1", "system": system, "attempt": 1, "publication": 1}
-	cachePublish(t, base, PlatformTag(system), recipients)
-	delta := NewSnapshot(storage, cacheTestRepository)
-	delta.Metadata = liveTestMetadata("2", system, 1)
-	path := cacheRecord(delta, "a")
-	blocked := errors.New("deletion unavailable")
-	publisher := &livePublisher{snapshot: base, system: system, run: "2", attempt: 1, recipients: recipients, retire: func(...string) error { return blocked }}
-	if err := publisher.publish(delta, false); !errors.Is(err, blocked) {
-		t.Fatal(err)
-	}
-	count := len(storage.manifests)
-	delta.Metadata["status"] = "failure"
-	if err := publisher.publish(delta, true); !errors.Is(err, blocked) || len(storage.manifests) != count {
-		t.Fatal("publication grew the cleanup backlog", err)
-	}
-	current, err := loadPlatform(storage, cacheTestRepository, system, identity)
-	if err != nil || !current.Contains(path) {
-		t.Fatal("cleanup failure invalidated published output", err)
 	}
 }
 
@@ -144,15 +125,7 @@ func TestLivePublicationBatchesPendingOutputsAndForcesFinalHead(t *testing.T) {
 		return path
 	}
 	first := addOutput("a")
-	versions := &registryVersions{storage: storage}
-	retirer := newVersionRetirer(versions.api, storage, cacheTestRepository)
-	publisher := &livePublisher{snapshot: NewSnapshot(storage, cacheTestRepository), system: system, run: "1", attempt: 1, recipients: recipients, retire: func(digests ...string) error {
-		if err := retirer.retire(digests...); err != nil {
-			return err
-		}
-		collectTestBlobs(t, storage)
-		return nil
-	}}
+	publisher := &livePublisher{snapshot: NewSnapshot(storage, cacheTestRepository), system: system, run: "1", attempt: 1, recipients: recipients}
 	publisher.dirty = true
 	if current, err := publisher.flush(delta, false); err != nil || !current {
 		t.Fatal("first output was not published immediately", current, err)
@@ -178,7 +151,7 @@ func TestLivePublicationBatchesPendingOutputsAndForcesFinalHead(t *testing.T) {
 	}
 	for _, char := range []string{"a", "b"} {
 		if got := string(cacheRead(t, head, "cache/nar/"+strings.Repeat(char, 64)+".nar.zst", identity)); got != "archive "+char {
-			t.Fatal("generation retirement collected a batched archive", got)
+			t.Fatal("publication lost a batched archive", got)
 		}
 	}
 	third := addOutput("c")
@@ -282,18 +255,6 @@ func TestLoadResultRequiresExactAttemptBinding(t *testing.T) {
 func TestEmptyPackageAdmissionThenFirstLivePublication(t *testing.T) {
 	identity, recipients := cacheKeys(t)
 	storage := newMemoryCache()
-	versions := &registryVersions{storage: storage}
-	api := func(path, method string) (any, error) {
-		if strings.Contains(path, "/versions?") && len(storage.manifests) == 0 {
-			return nil, ErrObjectNotFound
-		}
-		return versions.api(path, method)
-	}
-	retirer := newVersionRetirer(api, storage, cacheTestRepository)
-	var log bytes.Buffer
-	if _, err := Prune(api, storage, cacheTestRepository, &log); err != nil {
-		t.Fatal("missing package blocked admission cleanup", err)
-	}
 	const system = "aarch64-linux"
 	base, err := loadPlatform(storage, cacheTestRepository, system, identity)
 	if err != nil {
@@ -302,17 +263,17 @@ func TestEmptyPackageAdmissionThenFirstLivePublication(t *testing.T) {
 	delta := NewSnapshot(storage, cacheTestRepository)
 	delta.Metadata = liveTestMetadata("1", system, 1)
 	path := cacheRecord(delta, "a")
-	publisher := &livePublisher{snapshot: base, system: system, run: "1", attempt: 1, recipients: recipients, retire: retirer.retire}
+	publisher := &livePublisher{snapshot: base, system: system, run: "1", attempt: 1, recipients: recipients}
 	if err := publisher.publish(delta, false); err != nil {
 		t.Fatal("first cache publication failed", err)
 	}
 	if err := publisher.publish(delta, true); err != nil {
-		t.Fatal("new package could not retire its first generation", err)
+		t.Fatal("new package could not publish its final generation", err)
 	}
 	collectTestBlobs(t, storage)
 	reader := NewSnapshotReader(storage, cacheTestRepository, "", identity, io.Discard)
 	current, err := reader.Current(NarinfoKey(path))
-	if err != nil || !current.Contains(path) || len(storage.manifests) != 1 {
+	if err != nil || !current.Contains(path) || len(storage.manifests) != 2 {
 		t.Fatal("new package did not become a usable cache", err)
 	}
 }

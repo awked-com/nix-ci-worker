@@ -42,6 +42,7 @@ type catalogNode struct {
 
 type catalogView struct {
 	mu         sync.Mutex
+	nodeLocks  map[string]*sync.Mutex
 	storage    Storage
 	repository string
 	manifest   Manifest
@@ -366,6 +367,18 @@ func (v *catalogView) node(descriptor Descriptor, prefix string, consumer bool, 
 	if err := v.reachableBlob(descriptor); err != nil {
 		return catalogNode{}, err
 	}
+	v.mu.Lock()
+	if v.nodeLocks == nil {
+		v.nodeLocks = map[string]*sync.Mutex{}
+	}
+	lock := v.nodeLocks[descriptor.Digest]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		v.nodeLocks[descriptor.Digest] = lock
+	}
+	v.mu.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
 	v.mu.Lock()
 	prior, seen := v.prefixes[descriptor.Digest]
 	node, exists := v.nodes[descriptor.Digest]

@@ -107,40 +107,6 @@ func TestPoolMessagesAreEncryptedAndBoundToRequestAndRecord(t *testing.T) {
 	}
 }
 
-func TestPoolArtifactPublicationPreservesPendingRetirement(t *testing.T) {
-	for _, role := range []string{"inputs", "result"} {
-		t.Run(role, func(t *testing.T) {
-			bus := poolFixture(t)
-			storage := bus.storage.(*memoryCache)
-			old := NewSnapshot(storage, bus.repository)
-			old.Metadata = map[string]any{"kind": "pool", "run": bus.run}
-			digest := cachePublish(t, old, bus.artifactTag(role, 1, 1), bus.recipients)
-			versions := &registryVersions{storage: storage}
-			nextDigest := ""
-			api := func(path, method string) (any, error) {
-				if method == "GET" && strings.HasSuffix(path, "/versions/1") && nextDigest == "" {
-					// Publish the next assignment after inventory, before deletion
-					// rechecks the preceding assignment's tags and immutable identity.
-					next := NewSnapshot(storage, bus.repository)
-					next.Metadata = map[string]any{"kind": "pool", "run": bus.run}
-					nextDigest = cachePublish(t, next, bus.artifactTag(role, 1, 2), bus.recipients)
-				}
-				return versions.api(path, method)
-			}
-			if err := newVersionRetirer(api, storage, bus.repository).retire(digest); err != nil {
-				t.Fatal("a new assignment changed the pending retirement candidate", err)
-			}
-			if _, _, err := storage.GetManifest(bus.repository, digest); !errors.Is(err, ErrObjectNotFound) {
-				t.Fatal("preceding assignment was not retired", err)
-			}
-			_, retained, err := storage.GetManifest(bus.repository, bus.artifactTag(role, 1, 2))
-			if err != nil || nextDigest == "" || retained != nextDigest {
-				t.Fatal("retirement removed the next assignment's artifact", retained, nextDigest, err)
-			}
-		})
-	}
-}
-
 func TestPoolRejectsExpiredAndFutureLeases(t *testing.T) {
 	old := &poolMessage{Sent: time.Now().Add(-poolLease - time.Second)}
 	if poolFresh(old, poolLease) {
@@ -348,17 +314,32 @@ func TestHelperAcknowledgesOnceAndExitsAfterUploading(t *testing.T) {
 	}
 }
 
+type countedLeaseStore struct {
+	coordinationStore
+	prefix string
+	reads  atomic.Int64
+}
+
+func (s *countedLeaseStore) Read(prefix, previous string) (string, []byte, error) {
+	if prefix == s.prefix {
+		s.reads.Add(1)
+	}
+	return s.coordinationStore.Read(prefix, previous)
+}
+
 func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 	bus := poolFixture(t)
 	if err := bus.write("coordinator", 0, poolMessage{Session: "session", State: "running"}); err != nil {
 		t.Fatal(err)
 	}
+	control := &countedLeaseStore{coordinationStore: bus.control, prefix: bus.prefix("coordinator", 0)}
+	bus.control = control
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started, cancelled := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, 300 * time.Millisecond, time.Second}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
+		done <- servePoolBuilder(ctx, bus, 2, nil, poolTiming{5 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond, time.Second}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
 			close(started)
 			<-ctx.Done()
 			close(cancelled)
@@ -371,6 +352,7 @@ func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
+	before := control.reads.Load()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -383,6 +365,9 @@ func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 	case <-cancelled:
 	case <-time.After(time.Second):
 		t.Fatal("abandoned build did not cancel")
+	}
+	if reads := control.reads.Load() - before; reads > 8 {
+		t.Fatal("busy helper kept polling its lease at assignment cadence", reads)
 	}
 }
 
@@ -786,9 +771,9 @@ func TestSchedulerStopsAssignmentsWhenRetirementFails(t *testing.T) {
 	var started atomic.Int32
 	err := p.schedule(p.ctx, graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 		started.Add(1)
-		return fmt.Errorf("%w: retirement failed", errPoolPublication)
+		return fmt.Errorf("%w: publication failed", errPoolPublication)
 	})
 	if !errors.Is(err, errPoolPublication) || started.Load() != RunnersPerSystem {
-		t.Fatal("retirement backlog admitted more work", started.Load(), err)
+		t.Fatal("publication backlog admitted more work", started.Load(), err)
 	}
 }

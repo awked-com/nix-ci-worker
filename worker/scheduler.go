@@ -361,27 +361,20 @@ func (p *BuildPool) remoteTask(ctx context.Context, runner int, remote poolMessa
 	}
 }
 
-func (p *BuildPool) build(source, system string, graph *Plan, missing []string, delta *Snapshot, signingKey, recipients Secret, log io.Writer, options []string, after func(bool) (*snapshotIndex, bool, error)) error {
+func (p *BuildPool) build(source, system string, graph *Plan, missing []string, delta *Snapshot, signingKey, recipients Secret, log io.Writer, options []string, after func(bool) (*snapshotIndex, error)) error {
 	public, err := signingPublicKey(signingKey.Data)
 	if err != nil {
 		return err
 	}
 	var inputs atomic.Pointer[snapshotIndex]
-	retirements := []string{}
 	refresh := func(force bool) error {
-		index, headCurrent, err := after(force)
+		index, err := after(force)
 		if err != nil {
 			return err
 		}
 		// extend replaces the index's maps; active assignments keep this view.
 		view := *index
 		inputs.Store(&view)
-		if headCurrent && len(retirements) > 0 && p.bus.retire != nil {
-			if err = p.bus.retire(retirements...); err != nil {
-				return err
-			}
-			retirements = nil
-		}
 		return nil
 	}
 	if err = refresh(false); err != nil {
@@ -416,17 +409,17 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 			}
 		}
 	}()
-	execute := func(ctx context.Context, runner int, spec string, remote poolMessage) (*Snapshot, string, error) {
+	execute := func(ctx context.Context, runner int, spec string, remote poolMessage) (*Snapshot, error) {
 		if err := ctx.Err(); err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		drv := strings.SplitN(spec, "^", 2)[0]
 		buildInputs, err := graph.BuildInputs(drv)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		if runner == 0 {
-			return nil, "", buildPoolDerivation(ctx, source, system, spec, remote.Cores, buildInputs, options, log)
+			return nil, buildPoolDerivation(ctx, source, system, spec, remote.Cores, buildInputs, options, log)
 		}
 		paths := []string{}
 		for _, path := range graph.Outputs[drv] {
@@ -440,25 +433,25 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 		input.Metadata = map[string]any{"kind": "pool", "run": p.bus.run}
 		digest, err := input.Publish(p.bus.artifactTag("inputs", runner, remote.Sequence), recipients)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: %w", errPoolPublication, err)
+			return nil, fmt.Errorf("%w: %w", errPoolPublication, err)
 		}
 		task := poolTask{Cores: remote.Cores, Installable: spec, BuildInputs: buildInputs, Inputs: digest, PublicKey: public, Outputs: paths}
 		result, err := p.remoteTask(ctx, runner, remote, task)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		transportKey := p.bus.signingKey(runner)
 		transportPublic, err := signingPublicKey(transportKey.Data)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		if err = poolCopy(ctx, source, result, p.bus.identity, public+" "+transportPublic, paths, log); err != nil {
-			return nil, "", err
+			return nil, err
 		}
-		return result, digest, nil
+		return result, nil
 	}
 	err = p.schedule(ctx, graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage, release func()) error {
-		result, inputDigest, buildError := execute(ctx, runner, spec, remote)
+		result, buildError := execute(ctx, runner, spec, remote)
 		if errors.Is(buildError, errPoolPublication) {
 			cancel(buildError)
 			return buildError
@@ -481,9 +474,6 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 					delta.Files[name] = file
 				}
 			}
-			if p.bus.retire != nil {
-				retirements = append(retirements, inputDigest, result.Digest)
-			}
 		}
 		if err := refresh(false); err != nil {
 			failure := fmt.Errorf("%w: %w", errPoolPublication, err)
@@ -501,8 +491,7 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 	if errors.Is(err, errPoolPublication) || p.ctx.Err() != nil {
 		return err
 	}
-	// Helpers may already have exited. Retain their immutable manifests until
-	// the cumulative head covers every signed result, including partial failures.
+	// Flush every signed result, including partial failures, before completion.
 	if flushError := refresh(true); flushError != nil {
 		return fmt.Errorf("%w: %w", errPoolPublication, flushError)
 	}

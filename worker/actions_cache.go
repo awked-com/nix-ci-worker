@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,6 +36,10 @@ type actionsCache struct {
 	writes        chan struct{}
 	nextWrite     time.Time
 	writeInterval time.Duration
+	requests      atomic.Int64
+	reads         atomic.Int64
+	updates       atomic.Int64
+	writeWait     atomic.Int64
 }
 
 func newActionsCache(endpoint string, token Secret) (*actionsCache, error) {
@@ -74,9 +79,11 @@ func (c *actionsCache) Write(key string, data []byte) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	waiting := time.Now()
 	if err := c.beginWrite(ctx); err != nil {
 		return err
 	}
+	c.writeWait.Add(time.Since(waiting).Nanoseconds())
 	defer func() { <-c.writes }()
 	var reservation struct {
 		OK  bool   `json:"ok"`
@@ -109,10 +116,12 @@ func (c *actionsCache) Write(key string, data []byte) error {
 	if !finalized.OK {
 		return errors.New("Actions cache publication failed")
 	}
+	c.updates.Add(1)
 	return nil
 }
 
 func (c *actionsCache) Read(prefix, previous string) (string, []byte, error) {
+	c.reads.Add(1)
 	if !coordinationKey.MatchString(prefix) || (previous != "" && (!coordinationKey.MatchString(previous) || !strings.HasPrefix(previous, prefix))) {
 		return "", nil, errors.New("invalid coordination mailbox")
 	}
@@ -215,6 +224,7 @@ func (c *actionsCache) request(ctx context.Context, method, endpoint string, dat
 			request.Header = http.Header{}
 		}
 		request.Header.Set("User-Agent", "https://github.com/awked-com/nix-ci-worker")
+		c.requests.Add(1)
 		response, err := c.client.Do(request)
 		if err != nil {
 			last = errors.New("Actions cache request transport failed")
@@ -248,4 +258,8 @@ func (c *actionsCache) request(ctx context.Context, method, endpoint string, dat
 		return body, nil
 	}
 	return nil, last
+}
+
+func (c *actionsCache) metrics() map[string]any {
+	return map[string]any{"http_requests": c.requests.Load(), "mailbox_reads": c.reads.Load(), "published_updates": c.updates.Load(), "write_wait_seconds": float64(c.writeWait.Load()) / float64(time.Second)}
 }

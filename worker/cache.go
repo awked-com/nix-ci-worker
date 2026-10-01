@@ -59,35 +59,54 @@ func (r *SnapshotReader) Current(name string) (*Snapshot, error) {
 	} else {
 		r.mu.Lock()
 	}
-	defer r.mu.Unlock()
-
 	missing := r.snapshot == nil || (name != "" && !r.snapshot.HasFile(name))
 	now := r.now()
 	if !now.Before(r.deadline) || (missing && !now.Before(r.retryAfter)) {
 		r.refresh()
 	}
-	if r.snapshot != nil && name != "" && !r.snapshot.HasFile(name) {
-		err := r.lookup(name)
+	snapshot = r.snapshot
+	views := r.currentViews()
+	refreshError := r.refreshError
+	r.mu.Unlock()
+	if snapshot != nil && name != "" && !snapshot.HasFile(name) {
+		err := r.lookup(name, views)
 		if errors.Is(err, ErrObjectNotFound) {
-			// A superseded manifest can be collected while a client has only loaded
-			// its root. Retry the current heads before failing an uncached lookup.
+			// Recover a missing shard after external registry changes.
+			r.mu.Lock()
 			r.refresh()
-			err = r.lookup(name)
+			views = r.currentViews()
+			refreshError = r.refreshError
+			r.mu.Unlock()
+			err = r.lookup(name, views)
 			if errors.Is(err, ErrObjectNotFound) {
 				err = errors.New("cache catalog references a missing blob")
 			}
 		}
-		if err != nil && !r.snapshot.HasFile(name) {
+		r.stateMu.RLock()
+		snapshot = r.snapshot
+		r.stateMu.RUnlock()
+		if err != nil && !snapshot.HasFile(name) {
 			return nil, fmt.Errorf("cache catalog lookup failed: %w", err)
 		}
 	}
-	if r.refreshError != nil && (r.snapshot == nil || (name != "" && !r.snapshot.HasFile(name))) {
-		return nil, r.refreshError
+	if refreshError != nil && (snapshot == nil || (name != "" && !snapshot.HasFile(name))) {
+		return nil, refreshError
 	}
-	if r.snapshot == nil {
+	if snapshot == nil {
 		return nil, ErrObjectNotFound
 	}
-	return r.snapshot, nil
+	return snapshot, nil
+}
+
+// Called under mu; views remain valid while a later refresh replaces the heads.
+func (r *SnapshotReader) currentViews() []*catalogView {
+	views := []*catalogView{}
+	for _, reference := range r.references() {
+		if view := r.views[reference]; view != nil {
+			views = append(views, view)
+		}
+	}
+	return views
 }
 
 func (r *SnapshotReader) references() []string {
@@ -100,39 +119,53 @@ func (r *SnapshotReader) references() []string {
 func (r *SnapshotReader) refresh() {
 	var failures []error
 	references := r.references()
-	for _, reference := range references {
+	type result struct {
+		view *catalogView
+		err  error
+	}
+	results := make([]result, len(references))
+	var group sync.WaitGroup
+	for i, reference := range references {
 		prior := r.views[reference]
-		var digest string
-		var manifest Manifest
-		var err error
-		if prior != nil {
-			digest, err = r.storage.ManifestDigest(r.repository, reference)
-		}
-		if err == nil && (prior == nil || prior.digest != digest) {
-			manifest, digest, err = r.storage.GetManifest(r.repository, reference)
-			if err == nil {
-				var identity Secret
-				identity, err = r.identity.read()
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			var digest string
+			var err error
+			view := prior
+			if prior != nil {
+				digest, err = r.storage.ManifestDigest(r.repository, reference)
+			}
+			if err == nil && (prior == nil || prior.digest != digest) {
+				var manifest Manifest
+				manifest, digest, err = r.storage.GetManifest(r.repository, reference)
 				if err == nil {
-					var view *catalogView
-					view, err = openCatalog(r.storage, r.repository, manifest, digest, identity)
+					var identity Secret
+					identity, err = r.identity.read()
 					if err == nil {
-						if prior != nil {
-							for hash, node := range prior.nodes {
-								if _, reachable := view.reachable[hash]; reachable {
-									view.nodes[hash] = node
-								}
+						view, err = openCatalog(r.storage, r.repository, manifest, digest, identity)
+					}
+					if err == nil && prior != nil {
+						prior.mu.Lock()
+						for hash, node := range prior.nodes {
+							if _, reachable := view.reachable[hash]; reachable {
+								view.nodes[hash] = node
 							}
 						}
-						r.views[reference] = view
+						prior.mu.Unlock()
 					}
 				}
 			}
-		}
-		if err != nil {
-			if !errors.Is(err, ErrObjectNotFound) || prior != nil || len(references) == 1 {
-				failures = append(failures, err)
-			}
+			results[i] = result{view, err}
+		}()
+	}
+	group.Wait()
+	for i, reference := range references {
+		result := results[i]
+		if result.err == nil {
+			r.views[reference] = result.view
+		} else if !errors.Is(result.err, ErrObjectNotFound) || r.views[reference] != nil || len(references) == 1 {
+			failures = append(failures, result.err)
 		}
 	}
 	if len(r.views) == 0 && len(failures) == 0 {
@@ -209,24 +242,26 @@ func mergeConsumerRecords(target, source *Snapshot) error {
 	return nil
 }
 
-func (r *SnapshotReader) lookup(name string) error {
+func (r *SnapshotReader) lookup(name string, views []*catalogView) error {
 	identity, err := r.identity.read()
 	if err != nil {
 		return err
 	}
-	next := r.copySnapshot()
 	var failures []error
-	for _, reference := range r.references() {
-		view := r.views[reference]
-		if view == nil {
-			continue
-		}
+	for _, view := range views {
 		found, err := view.lookup(name, identity)
 		if err != nil {
 			failures = append(failures, err)
 			continue
 		}
-		if err = mergeConsumerRecords(next, found); err != nil {
+		r.mu.Lock()
+		next := r.copySnapshot()
+		err = mergeConsumerRecords(next, found)
+		if err == nil {
+			r.setSnapshot(next)
+		}
+		r.mu.Unlock()
+		if err != nil {
 			failures = append(failures, err)
 			continue
 		}
@@ -234,7 +269,6 @@ func (r *SnapshotReader) lookup(name string) error {
 			break
 		}
 	}
-	r.setSnapshot(next)
 	return errors.Join(failures...)
 }
 

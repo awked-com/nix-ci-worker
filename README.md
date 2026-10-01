@@ -66,7 +66,7 @@ The workflow supplies these environment variables:
 | `CI_IDENTITY` | Age identity bytes, not a filename |
 | `CI_RECIPIENTS` | Newline-separated age recipients |
 | `NIX_SIGNING_KEY` | Final cache signing key for coordinators |
-| `REGISTRY_USER`, `REGISTRY_TOKEN` | Cache registry and GitHub Actions API credentials |
+| `REGISTRY_USER`, `REGISTRY_TOKEN` | Cache registry credentials |
 | `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL` | Automatic Actions cache credentials, supplied by the JavaScript action launching the worker |
 | `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` | Actions run identity |
 | `GITHUB_OUTPUT` | Actions output file used by admission |
@@ -78,22 +78,11 @@ cache head. Coordinators batch head updates on a 30-second publication cadence
 while runners continue independent builds. Completion and disk reclamation force
 pending outputs into the head. Outputs become available during builds.
 
-Each platform head retains all previously cached outputs. Publication tags the
-new generation before advancing the head, then retires the superseded manifest.
-Helper artifacts are retired after their outputs have been verified, signed, and
-published. Admission cleans up artifacts left by interrupted runs.
-
-Versions explicitly protected by GitHub's public-package download limit are
-kept, including their historical tags, without blocking publication or
-assignments. Cleanup continues with other versions and retries retained versions
-on later runs. Other cleanup failures still stop new publication or assignments
-until a retry succeeds. Protected versions and their referenced blobs can
-accumulate.
-
-Cleanup validates ownership and retention metadata and rechecks candidates
-before deletion. Historical generation tags are checked against retention
-metadata; manual tags and unmarked artifacts are outside managed cleanup.
-Catalog pieces are blobs rather than package versions.
+Each platform head retains all previously cached outputs. Publication tags every
+new generation before advancing the head. Historical generations, results, and
+helper snapshots remain available permanently; the worker never deletes registry
+versions or evicts old outputs. Registry storage grows with retained history.
+Publication and admission do not depend on package cleanup or package Admin access.
 
 Coordinators and helpers exchange small encrypted, authenticated messages
 through GitHub Actions cache v2. The workflow must launch the worker from a
@@ -102,6 +91,8 @@ ordinary shell steps do not receive them automatically.
 
 Coordination messages are bound to the request, source revision, run, attempt,
 platform, and runner. Missing or expired messages return work to the coordinator.
+Terminal encrypted results include coordinator request counts and write-throttle
+wait time under `coordination`.
 
 Helpers must not receive the final cache signing key. The worker removes
 credential environment variables before executing build subprocesses and
