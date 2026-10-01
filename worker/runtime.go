@@ -24,7 +24,7 @@ func NativeSystem() (string, error) {
 		"amd64": "x86_64",
 	}[runtime.GOARCH]
 	s := arch + "-" + runtime.GOOS
-	if _, ok := Systems[s]; !ok {
+	if arch == "" || (runtime.GOOS != "linux" && s != "aarch64-darwin") {
 		return "", errors.New("unsupported runtime system")
 	}
 
