@@ -212,7 +212,7 @@ func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 	defer p.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	helpers := make(chan error, 2)
+	helpers := make(chan error, RunnersPerSystem-1)
 	for runner := 1; runner < RunnersPerSystem; runner++ {
 		go func() {
 			helpers <- servePoolBuilder(ctx, bus, runner, []string{"big-parallel"}, timing, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
@@ -250,7 +250,7 @@ func TestNativePoolBuildsAndPublishesDependencyGraph(t *testing.T) {
 	if err != nil || !success {
 		t.Fatalf("pool build: success=%v err=%v\n%s", success, err, &output)
 	}
-	for range 2 {
+	for range RunnersPerSystem - 1 {
 		select {
 		case err := <-helpers:
 			if err != nil {
@@ -377,7 +377,7 @@ func TestNativePoolImportsNonSubstitutableDependencies(t *testing.T) {
 			}
 			defer server.Close()
 			if missing {
-				err := buildPoolDerivation(context.Background(), source, system, consumer+"^out", 1, buildInputs, options, log)
+				err := buildPoolDerivation(context.Background(), source, consumer+"^out", 1, buildInputs, options, log)
 				if err == nil || !strings.Contains(err.Error(), "build input import failed") {
 					t.Fatalf("missing input did not stop before compilation: %v\n%s", err, &diagnostics)
 				}
@@ -400,14 +400,11 @@ func TestNativePoolImportsNonSubstitutableDependencies(t *testing.T) {
 			if err != nil || !bytes.Equal(got, original) {
 				t.Fatal("shared dependency was rebuilt", string(got), err)
 			}
-			// macOS cannot compile inside a diverted store. Ask Nix which work
-			// remains; the shared dependency must not appear in its build plan.
-			var planned bytes.Buffer
-			if _, err = NixRun(source, &planned, []string{"build", "--dry-run", "--no-link", "--offline", "--option", "substitute", "false", "--option", "always-allow-substitutes", "false", consumer + "^out"}, true, nil); err != nil {
-				t.Fatalf("plan consumer build: %v\n%s", err, &planned)
+			if _, err = NixRun(source, log, []string{"build", "--no-link", "--offline", "--option", "substitute", "false", "--option", "always-allow-substitutes", "false", consumer + "^out"}, false, nil); err != nil {
+				t.Fatalf("consumer build: %v\n%s", err, &diagnostics)
 			}
-			if !strings.Contains(planned.String(), consumer) || strings.Contains(planned.String(), dependency) {
-				t.Fatalf("consumer would rebuild its dependency:\n%s", &planned)
+			if got, err := os.ReadFile(store + dependencyOutput); err != nil || !bytes.Equal(got, original) {
+				t.Fatal("consumer rebuilt the imported dependency", string(got), err)
 			}
 			live := func() string {
 				t.Helper()

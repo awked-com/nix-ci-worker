@@ -56,16 +56,16 @@ func TestSchedulerReservesCoordinatorForRestrictedWork(t *testing.T) {
 			pool.ctx = ctx
 			graph := &Plan{Derivations: map[string]Derivation{
 				"a": derivation("a-out"), "b": derivation("b-out"),
-				"c": derivation("c-out", "a"), "z": derivation("z-out"),
+				"c": derivation("c-out", "a"), "d": derivation("d-out"), "z": derivation("z-out"),
 			}}
 			restricted := graph.Derivations["z"]
 			restricted.Env = env
 			graph.Derivations["z"] = restricted
-			started := make(chan string, 4)
+			started := make(chan string, len(graph.Derivations))
 			builds := make(chan struct{})
 			done := make(chan error, 1)
 			go func() {
-				done <- pool.schedule(pool.ctx, graph, []string{"a^out", "b^out", "c^out", "z^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
+				done <- pool.schedule(pool.ctx, graph, []string{"a^out", "b^out", "c^out", "d^out", "z^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 					started <- fmt.Sprintf("%d:%s", runner, spec)
 					select {
 					case <-builds:
@@ -102,16 +102,16 @@ func TestSchedulerPipelinesBuildsWithoutReleasingDependencies(t *testing.T) {
 	pool.ctx = ctx
 	graph := &Plan{Derivations: map[string]Derivation{
 		"a": derivation("a-out"), "b": derivation("b-out"), "c": derivation("c-out"),
-		"d": derivation("d-out"), "e": derivation("e-out"), "z": derivation("z-out", "a"),
+		"d": derivation("d-out"), "e": derivation("e-out"), "f": derivation("f-out"), "z": derivation("z-out", "a"),
 	}}
 	started := make(chan string, len(graph.Derivations))
 	published := make(chan struct{})
 	builds := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- pool.schedule(pool.ctx, graph, []string{"a^out", "b^out", "c^out", "d^out", "e^out", "z^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
+		done <- pool.schedule(pool.ctx, graph, []string{"a^out", "b^out", "c^out", "d^out", "e^out", "f^out", "z^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
 			started <- fmt.Sprintf("%d:%s", runner, spec)
-			if spec == "a^out" || spec == "d^out" {
+			if spec == "a^out" || spec == "e^out" {
 				releaseRunner()
 				releaseRunner()
 				select {
@@ -130,7 +130,7 @@ func TestSchedulerPipelinesBuildsWithoutReleasingDependencies(t *testing.T) {
 		})
 	}()
 	seen := map[string]bool{}
-	for len(seen) < 4 {
+	for len(seen) < RunnersPerSystem+1 {
 		select {
 		case event := <-started:
 			seen[event] = true
@@ -138,7 +138,7 @@ func TestSchedulerPipelinesBuildsWithoutReleasingDependencies(t *testing.T) {
 			t.Fatal("runner waited for its previous publication", seen)
 		}
 	}
-	if !seen["0:a^out"] || !seen["0:d^out"] || !seen["1:b^out"] || !seen["2:c^out"] {
+	if !seen["0:a^out"] || !seen["0:e^out"] || !seen["1:b^out"] || !seen["2:c^out"] || !seen["3:d^out"] {
 		t.Fatal("unexpected pipeline assignments", seen)
 	}
 	select {
@@ -149,7 +149,7 @@ func TestSchedulerPipelinesBuildsWithoutReleasingDependencies(t *testing.T) {
 	close(published)
 	select {
 	case event := <-started:
-		if event != "0:e^out" && event != "0:z^out" {
+		if event != "0:f^out" && event != "0:z^out" {
 			t.Fatal("unexpected assignment after publication", event)
 		}
 	case <-ctx.Done():
@@ -168,7 +168,7 @@ func TestSchedulerOlderPublicationCannotReleaseCurrentBuild(t *testing.T) {
 	pool.ctx = ctx
 	graph := &Plan{Derivations: map[string]Derivation{}}
 	missing := []string{}
-	for _, drv := range []string{"a", "b", "c", "d", "e"} {
+	for _, drv := range []string{"a", "b", "c", "d", "e", "f"} {
 		graph.Derivations[drv] = derivation(drv + "-out")
 		missing = append(missing, drv+"^out")
 	}
@@ -196,7 +196,7 @@ func TestSchedulerOlderPublicationCannotReleaseCurrentBuild(t *testing.T) {
 			}
 		})
 	}()
-	for range 4 {
+	for range RunnersPerSystem + 1 {
 		select {
 		case <-started:
 		case <-ctx.Done():

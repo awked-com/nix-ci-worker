@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +21,9 @@ func nativeEnabled(t *testing.T) {
 		t.Skip("set INFRA_NATIVE_NIX_TESTS=1 to run against the local Nix daemon")
 	}
 
+	if runtime.GOOS != "linux" {
+		t.Skip("native CI build tests require Linux")
+	}
 	for _, tool := range []string{"nix", "nix-store"} {
 		if _, e := exec.LookPath(tool); e != nil {
 			t.Fatalf("%s required: %v", tool, e)
@@ -315,67 +317,5 @@ func TestNativeBuildPublishesSplitOutputsAndWarmResume(t *testing.T) {
 			}
 
 		})
-	}
-}
-
-func TestNativeDarwinSandboxProfileRemainsIsolated(t *testing.T) {
-	nativeEnabled(t)
-	if runtime.GOOS != "darwin" {
-		t.Skip("Darwin sandbox")
-	}
-
-	home, e := os.UserHomeDir()
-	if e != nil {
-		t.Fatal(e)
-	}
-
-	root, e := os.MkdirTemp(home, "infra-ci-sandbox-")
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer os.RemoveAll(root)
-
-	allowed, denied := filepath.Join(root, "allowed"), filepath.Join(root, "denied")
-	os.WriteFile(allowed, []byte("explicit profile access\n"), 0600)
-	os.WriteFile(denied, []byte("must remain inaccessible\n"), 0600)
-	profile := fmt.Sprintf("(allow file-read* (literal %q))", allowed)
-	script := fmt.Sprintf("read -r value < %s || exit 31; echo \"$value\"; if (read -r value < %s) 2>/dev/null; then exit 32; fi; echo okay > $out", shellQuote(allowed), shellQuote(denied))
-	profileJSON := strconv.Quote(profile)
-	scriptJSON := strconv.Quote(script)
-	expr := fmt.Sprintf(`builtins.derivation { name = "ci-sandbox-profile"; system = builtins.currentSystem; builder = "/bin/sh"; __sandboxProfile = %s; args = [ "-c" %s ]; }`, profileJSON, scriptJSON)
-	options := []string{
-		"--store", "local?store=" + root + "/store&state=" + root + "/state&log=" + root + "/log",
-		"--option", "build-users-group", "",
-		"--option", "substitute", "false",
-	}
-	b, e := exec.Command("nix-instantiate", append(options, "--expr", expr)...).CombinedOutput()
-	if e != nil {
-		t.Fatalf("instantiate: %v\n%s", e, b)
-	}
-
-	lines := strings.Fields(string(b))
-	drv := ""
-	for _, line := range lines {
-		if strings.HasSuffix(line, ".drv") {
-			drv = line
-		}
-	}
-
-	if drv == "" {
-		t.Fatalf("no derivation: %s", b)
-	}
-
-	command := BuildCommand("aarch64-darwin", 1, 1, options)
-	strict := exec.Command("nix", append(append([]string{}, command...), "--option", "sandbox", "true")...)
-	strict.Stdin = strings.NewReader(drv + "^*\n")
-	if e = strict.Run(); e == nil {
-		t.Fatal("strict sandbox unexpectedly accepted custom profile")
-	}
-
-	relaxed := exec.Command("nix", command...)
-	relaxed.Stdin = strings.NewReader(drv + "^*\n")
-	b, e = relaxed.CombinedOutput()
-	if e != nil {
-		t.Fatalf("custom profile isolation: %v\n%s", e, b)
 	}
 }

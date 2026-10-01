@@ -188,12 +188,7 @@ func Reclaim(source string, log io.Writer, graph *Plan, durable *Snapshot, roots
 	return diskFree("/nix/store")
 }
 
-func BuildCommand(system string, jobs, cores int, options []string) []string {
-	sandbox := "true"
-	if strings.HasSuffix(system, "-darwin") {
-		sandbox = "relaxed"
-	}
-
+func BuildCommand(jobs, cores int, options []string) []string {
 	return append([]string{
 		"--extra-experimental-features", "nix-command flakes",
 		"build",
@@ -205,7 +200,7 @@ func BuildCommand(system string, jobs, cores int, options []string) []string {
 		"--cores", strconv.Itoa(cores),
 		"--option", "max-substitution-jobs", "8",
 		"--option", "min-free", "0",
-		"--option", "sandbox", sandbox,
+		"--option", "sandbox", "true",
 		"--option", "sandbox-fallback", "false",
 	}, options...)
 }
@@ -620,7 +615,7 @@ func (b nativeBuild) execute() (bool, error) {
 			}
 			batchStarted := time.Now()
 			fmt.Fprintf(log, "Build batch %d/%d: %d output groups\n", number+1, len(batches), len(batch))
-			cmd := exec.Command("nix", BuildCommand(system, 1, runtime.NumCPU(), options)...)
+			cmd := exec.Command("nix", BuildCommand(1, runtime.NumCPU(), options)...)
 			cmd.Dir = source
 			cmd.Env = BuildEnvironment()
 			cmd.Stdin = strings.NewReader(strings.Join(batch, "\n") + "\n")

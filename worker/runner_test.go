@@ -437,16 +437,9 @@ func TestDiskGuardCancelsBlockedProcessAndFailsClosed(t *testing.T) {
 }
 
 func TestBuildCommandRequiresNativeSandbox(t *testing.T) {
-	for _, system := range []string{"x86_64-linux", "aarch64-darwin"} {
-		command := strings.Join(BuildCommand(system, 1, 2, nil), " ")
-		sandbox := "true"
-		if strings.HasSuffix(system, "-darwin") {
-			sandbox = "relaxed"
-		}
-
-		if !strings.Contains(command, "--option sandbox "+sandbox) || !strings.Contains(command, "--option sandbox-fallback false") || !strings.Contains(command, "--keep-going --stdin") {
-			t.Fatal(command)
-		}
+	command := strings.Join(BuildCommand(1, 2, nil), " ")
+	if !strings.Contains(command, "--option sandbox true") || !strings.Contains(command, "--option sandbox-fallback false") || !strings.Contains(command, "--keep-going --stdin") {
+		t.Fatal(command)
 	}
 }
 

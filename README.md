@@ -11,7 +11,7 @@ go build -o bin/nix-ci-worker ./cmd/nix-ci-worker
 go test ./...
 ```
 
-Native integration tests additionally need Git and a working local Nix daemon,
+Native integration tests additionally need Linux, Git, and a working Nix daemon,
 with `nix`, `nix-store`, and `nix-instantiate` on PATH:
 
 ```sh
@@ -46,7 +46,8 @@ anonymous reads; payloads remain encrypted. SIGINT or SIGTERM stops the server.
 
 ## Run builds
 
-Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
+CI supports x86_64-linux and aarch64-linux, with one coordinator and three helpers
+per platform. Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
 source flake. Select host system derivations and required checks there; their
 transitive dependencies determine which packages need building on each platform.
 Optional host/package selection follows NixOS configuration attributes.

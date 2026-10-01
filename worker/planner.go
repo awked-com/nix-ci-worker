@@ -18,9 +18,8 @@ import (
 const Policy = "native-upstream-2"
 
 var Systems = map[string]string{
-	"x86_64-linux":   "ubuntu-24.04",
-	"aarch64-linux":  "ubuntu-24.04-arm",
-	"aarch64-darwin": "macos-15",
+	"x86_64-linux":  "ubuntu-24.04",
+	"aarch64-linux": "ubuntu-24.04-arm",
 }
 var nativeName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 var attributeName = regexp.MustCompile(`^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*$`)
@@ -473,7 +472,7 @@ func flakeSourcePath(source string) (string, error) {
 		return "", e
 	}
 
-	// Nix path inputs reject symlink ancestors, including macOS /tmp.
+	// Nix path inputs reject symlink ancestors.
 	return filepath.EvalSymlinks(source)
 }
 

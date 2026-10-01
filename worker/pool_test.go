@@ -455,7 +455,7 @@ func TestSchedulerUsesEveryRunnerAndUnlocksDependenciesImmediately(t *testing.T)
 		})
 	}()
 	seen := map[string]bool{}
-	for len(seen) < 4 {
+	for len(seen) < RunnersPerSystem+1 {
 		select {
 		case event := <-started:
 			seen[event] = true
@@ -463,7 +463,7 @@ func TestSchedulerUsesEveryRunnerAndUnlocksDependenciesImmediately(t *testing.T)
 			t.Fatal("dependency waited behind unrelated large builds", seen)
 		}
 	}
-	for _, event := range []string{"0:a^out", "1:b^out", "2:c^out", "0:d^out"} {
+	for _, event := range []string{"0:a^out", "1:b^out", "2:c^out", "3:d^out", "0:e^out"} {
 		if !seen[event] {
 			t.Fatal(seen)
 		}
@@ -540,7 +540,7 @@ func TestPoolHonorsFeaturesAndLocalBuildPreference(t *testing.T) {
 
 func TestHelperWaitsForItsFinalAssignmentBeforeDraining(t *testing.T) {
 	bus := poolFixture(t)
-	if err := bus.write("coordinator", 0, poolMessage{Session: "session", State: "running", Finish: []uint64{0, 0, 1}}); err != nil {
+	if err := bus.write("coordinator", 0, poolMessage{Session: "session", State: "running", Finish: []uint64{0, 0, 1, 0}}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -669,7 +669,7 @@ func TestSchedulerKeepsHelpersWhileDependenciesCanUnlockWork(t *testing.T) {
 }
 
 func TestSchedulerAllowsHelpersToExitAfterFinalAssignment(t *testing.T) {
-	tasks := 3
+	tasks := RunnersPerSystem
 	t.Run(fmt.Sprintf("%d tasks", tasks), func(t *testing.T) {
 		p := schedulerFixture(t)
 		p.timing.startup = 0
@@ -759,7 +759,7 @@ func TestSchedulerRetriesExpiredFinalAssignmentOnCoordinator(t *testing.T) {
 	}
 }
 
-func TestSchedulerStopsAssignmentsWhenRetirementFails(t *testing.T) {
+func TestSchedulerStopsAssignmentsWhenPublicationFails(t *testing.T) {
 	p := schedulerFixture(t)
 	graph := &Plan{Derivations: map[string]Derivation{}}
 	missing := []string{}

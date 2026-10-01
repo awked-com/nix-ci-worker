@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-const RunnersPerSystem = 3
+const RunnersPerSystem = 4
 const coordinationLimit = 1024 * 1024
 const poolStartupTimeout = 10 * time.Minute
 const poolLease = 5 * time.Minute

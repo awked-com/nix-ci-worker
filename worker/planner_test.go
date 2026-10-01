@@ -267,7 +267,7 @@ func TestSelectedEvaluationAndPinnedSchema(t *testing.T) {
 
 func TestSelectedEvaluationRejectsUnsupportedNativeTarget(t *testing.T) {
 	_, _, e := SelectedTargets(".", map[string]string{"host": "host"}, func([]string, bool, []byte) ([]byte, error) {
-		return []byte(`{"system":"x86_64-darwin","drvPath":"/nix/store/test.drv"}`), nil
+		return []byte(`{"system":"unsupported","drvPath":"/nix/store/test.drv"}`), nil
 	})
 	if e == nil {
 		t.Fatal("unsupported runner accepted")
@@ -310,7 +310,7 @@ func TestNativePlannerNixIntegration(t *testing.T) {
 	}
 
 	flake := fmt.Sprintf(`{ outputs = { self }: let
-  systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
+  systems = [ "x86_64-linux" "aarch64-linux" ];
   make = system: derivation {
     name = "infra-ci-native-plan";
     inherit system;
@@ -428,7 +428,7 @@ func TestAdmissionRejectsInvalidSelectionsAndEvaluation(t *testing.T) {
 			t.Fatalf("invalid selection accepted: %v", value)
 		}
 	}
-	for _, output := range []string{`"x86_64-darwin"`, `""`, `null`, `{}`, `invalid`} {
+	for _, output := range []string{`"unsupported"`, `""`, `null`, `{}`, `invalid`} {
 		matrix, err := AdmissionMatrix(t.TempDir(), map[string]string{"host": "host"}, func([]string, bool, []byte) ([]byte, error) {
 			return []byte(output), nil
 		})
@@ -450,7 +450,7 @@ func TestAdmissionMatrixRejectsMissingAndInvalidRunners(t *testing.T) {
 	for _, rows := range [][]BuildRunner{
 		nil,
 		{row, row},
-		{{System: "aarch64-linux", Runner: "macos-15"}},
+		{{System: "aarch64-linux", Runner: "ubuntu-24.04"}},
 		{{System: "unsupported", Runner: "self-hosted"}},
 		{{}},
 	} {

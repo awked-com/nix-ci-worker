@@ -160,7 +160,7 @@ func (c *actionsCache) Read(prefix, previous string) (string, []byte, error) {
 	return entry.Key, data, nil
 }
 
-// Nine runners with four seconds between uploads stay below the repository's
+// Eight runners with four seconds between uploads stay below the repository's
 // 200 uploads/minute limit, with room for retries and ordinary dependency caches.
 // Reads use a separate path so a delayed publication cannot block lease checks.
 func (c *actionsCache) beginWrite(ctx context.Context) error {

@@ -203,14 +203,14 @@ func preparePoolInputs(ctx context.Context, source string, inputs, options []str
 	return release, nil
 }
 
-func buildPoolDerivation(ctx context.Context, source, system, spec string, cores int, inputs, options []string, log io.Writer) error {
+func buildPoolDerivation(ctx context.Context, source, spec string, cores int, inputs, options []string, log io.Writer) error {
 	release, err := preparePoolInputs(ctx, source, inputs, options, log)
 	if err != nil {
 		return err
 	}
 	defer release()
 	started := time.Now()
-	cmd, err := poolNixCommand(ctx, BuildCommand(system, 1, cores, append(slices.Clone(options), "--builders", "")))
+	cmd, err := poolNixCommand(ctx, BuildCommand(1, cores, append(slices.Clone(options), "--builders", "")))
 	if err != nil {
 		return err
 	}
@@ -258,7 +258,7 @@ func executePoolBuild(ctx context.Context, bus *poolBus, source string, runner i
 		return "", err
 	}
 	defer server.Close()
-	if err = buildPoolDerivation(ctx, source, bus.system, task.Installable, task.Cores, task.BuildInputs, options, log); err != nil {
+	if err = buildPoolDerivation(ctx, source, task.Installable, task.Cores, task.BuildInputs, options, log); err != nil {
 		return "", err
 	}
 	if len(handler.Errors()) != 0 {

@@ -419,7 +419,7 @@ func (p *BuildPool) build(source, system string, graph *Plan, missing []string, 
 			return nil, err
 		}
 		if runner == 0 {
-			return nil, buildPoolDerivation(ctx, source, system, spec, remote.Cores, buildInputs, options, log)
+			return nil, buildPoolDerivation(ctx, source, spec, remote.Cores, buildInputs, options, log)
 		}
 		paths := []string{}
 		for _, path := range graph.Outputs[drv] {
