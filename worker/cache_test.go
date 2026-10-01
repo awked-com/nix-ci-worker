@@ -1,13 +1,16 @@
 package worker
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"filippo.io/age"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -704,6 +707,80 @@ func TestCacheHTTPMetadataPathsAndEncryptedRoundTrip(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != 502 || len(handler.Errors()) != 1 {
 		t.Fatal("cache failure hidden")
+	}
+}
+
+func TestCacheServerServesAlongsideIdleConnections(t *testing.T) {
+	handler := NewCacheHandler(nil, "", "", Secret{}, nil)
+	server, listener, err := StartCacheServer(handler, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { server.Close() })
+	// Keep each completed request's connection idle while opening the next.
+	// Nix keeps these connections alive during parallel cache queries.
+	for range 64 {
+		connection, err := net.DialTimeout("tcp", listener.Addr().String(), 2*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { connection.Close() })
+		connection.SetDeadline(time.Now().Add(2 * time.Second))
+		request, _ := http.NewRequest("GET", "http://"+listener.Addr().String()+"/nix-cache-info", nil)
+		if err = request.Write(connection); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(bufio.NewReader(connection), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != http.StatusOK || string(body) != "StoreDir: /nix/store\nWantMassQuery: 1\n" {
+			t.Fatalf("cache metadata: status %d body %q error %v", response.StatusCode, body, err)
+		}
+	}
+}
+
+func TestCacheHandlerWaitsForCapacityAndCancels(t *testing.T) {
+	for _, cancel := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel=%v", cancel), func(t *testing.T) {
+			handler := NewCacheHandler(nil, "", "", Secret{}, nil)
+			for range cap(handler.slots) {
+				handler.slots <- struct{}{}
+			}
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			request := httptest.NewRequest("GET", "/nix-cache-info", nil).WithContext(ctx)
+			response := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				handler.ServeHTTP(response, request)
+			}()
+			select {
+			case <-done:
+				t.Fatal("full cache handler did not wait for capacity")
+			case <-time.After(20 * time.Millisecond):
+			}
+			if cancel {
+				stop()
+			} else {
+				<-handler.slots
+			}
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("queued request did not finish")
+			}
+			if cancel {
+				if response.Body.Len() != 0 {
+					t.Fatal("canceled request was processed")
+				}
+			} else if response.Code != http.StatusOK || response.Body.Len() == 0 {
+				t.Fatalf("queued metadata request: status %d body %q", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

@@ -376,8 +376,8 @@ func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	select {
 	case h.slots <- struct{}{}:
 		defer func() { <-h.slots }()
-	default:
-		panic(http.ErrAbortHandler)
+	case <-r.Context().Done():
+		return
 	}
 
 	if r.Method != "GET" && r.Method != "HEAD" {
@@ -470,57 +470,17 @@ func (h *CacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type cacheListener struct {
-	net.Listener
-	slots chan struct{}
-}
-
-type cacheConnection struct {
-	net.Conn
-	release func()
-	once    sync.Once
-}
-
-func (c *cacheConnection) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(c.release)
-	return err
-}
-
-func (l *cacheListener) Accept() (net.Conn, error) {
-	for {
-		connection, err := l.Listener.Accept()
-		if err != nil {
-			return nil, err
-		}
-
-		select {
-		case l.slots <- struct{}{}:
-			return &cacheConnection{
-				Conn:    connection,
-				release: func() { <-l.slots },
-			}, nil
-		default:
-			connection.Close()
-		}
-	}
-}
-
 func StartCacheServer(handler http.Handler, port int) (*http.Server, net.Listener, error) {
 	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	bounded := &cacheListener{
-		Listener: listener,
-		slots:    make(chan struct{}, 32),
-	}
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	go server.Serve(bounded)
-	return server, bounded, nil
+	go server.Serve(listener)
+	return server, listener, nil
 }
