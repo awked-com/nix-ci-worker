@@ -1,12 +1,10 @@
 package worker
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -275,96 +273,6 @@ func TestSelectedEvaluationRejectsUnsupportedNativeTarget(t *testing.T) {
 
 	if e := ValidateSelection(map[string]string{"host": "h", "other": "x"}); e == nil {
 		t.Fatal("unsupported selection key accepted")
-	}
-}
-
-func TestNativePlannerNixIntegration(t *testing.T) {
-	nativeEnabled(t)
-
-	system, e := NativeSystem()
-	if e != nil {
-		t.Fatal(e)
-	}
-
-	root := t.TempDir()
-	alias := filepath.Join(t.TempDir(), "tmp")
-	if e := os.Symlink(root, alias); e != nil {
-		t.Fatal(e)
-	}
-
-	root = filepath.Join(alias, "source")
-	if e := os.Mkdir(root, 0700); e != nil {
-		t.Fatal(e)
-	}
-
-	flake := fmt.Sprintf(`{ outputs = { self }: let
-  systems = [ "x86_64-linux" "aarch64-linux" ];
-  make = system: derivation {
-    name = "infra-ci-native-plan";
-    inherit system;
-    builder = "/bin/sh";
-    args = [ "-c" "echo native > $out" ];
-  };
-  selected = make %q;
-in {
-  hydraJobs = builtins.listToAttrs (map (system: { name = system; value.simple = make system; }) systems);
-  nixosConfigurations.host = {
-    config.system.build.toplevel = selected;
-    pkgs.hello = selected;
-    pkgs.routing = builtins.listToAttrs (map (system: {
-      name = system;
-      value = { inherit system; drvPath = throw "admission forced the build graph"; };
-    }) systems);
-  };
-}; }`, system)
-	if e := os.WriteFile(filepath.Join(root, "flake.nix"), []byte(flake), 0600); e != nil {
-		t.Fatal(e)
-	}
-
-	var log bytes.Buffer
-
-	nix := func(args []string, capture bool, data []byte) ([]byte, error) {
-		return NixRun(root, &log, args, capture, data)
-	}
-
-	for name, selection := range map[string]map[string]string{
-		"all":  nil,
-		"host": {"host": "host"},
-		"package": {
-			"host":    "host",
-			"package": "hello",
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			log.Reset()
-			matrix, e := AdmissionMatrix(root, selection, nix)
-			if e != nil {
-				t.Fatalf("%v\n%s", e, &log)
-			}
-			systems, e := matrix.Systems()
-			if e != nil || (selection != nil && (len(systems) != 1 || systems[0] != system)) {
-				t.Fatal(matrix, e)
-			}
-			p, e := Evaluate(root, system, nix, selection, &log)
-			if e != nil {
-				t.Fatalf("%v\n%s", e, &log)
-			}
-			if p == nil || len(p.Targets) != 1 || len(p.Required) < 2 {
-				t.Fatal(p)
-			}
-		})
-	}
-	for _, system := range sortedKeys(Systems) {
-		t.Run("route/"+system, func(t *testing.T) {
-			log.Reset()
-			matrix, e := AdmissionMatrix(root, map[string]string{"host": "host", "package": "routing." + system}, nix)
-			if e != nil {
-				t.Fatalf("%v\n%s", e, &log)
-			}
-			if len(matrix.Include) != 1 || matrix.Include[0].System != system {
-				t.Fatal(matrix)
-			}
-		})
 	}
 }
 

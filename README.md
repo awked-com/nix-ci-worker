@@ -9,14 +9,7 @@ go build -o bin/nix-ci-worker ./cmd/nix-ci-worker
 go test ./...
 ```
 
-Native tests need Linux, Git, and a Nix daemon (`nix` and `nix-store` on PATH):
-
-```sh
-INFRA_NATIVE_NIX_TESTS=1 go test ./worker -run '^TestNative' -count=1
-```
-
 Nix must support derivation JSON version 4 and `nix path-info --json-format 1`.
-Tests create temporary derivations and store paths.
 
 ## Serve an encrypted cache
 
