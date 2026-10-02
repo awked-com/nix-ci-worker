@@ -35,7 +35,7 @@ Create `cache.json`:
 
 Point a Nix substituter at `http://127.0.0.1:8080` with the public signing key.
 GHCR must allow anonymous reads; payloads stay encrypted. The server reloads the
-age identity for each decryption. Use `--help` for command syntax.
+age identity for each decryption.
 
 ## Run builds
 
