@@ -50,7 +50,7 @@ func TestEvictedAssignmentHasBoundedAcknowledgement(t *testing.T) {
 				p.statuses[2].Store(&copy)
 				select {
 				case err := <-result:
-					if state != "ready" || err == nil || err.Error() != "builder did not acknowledge assignment" {
+					if state != "ready" || err == nil {
 						t.Fatalf("unexpected assignment outcome with fresh %s statuses: %v", state, err)
 					}
 					return

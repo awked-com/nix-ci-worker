@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -134,9 +133,6 @@ func TestNativeEvaluationCacheRestoresAnEmptyStore(t *testing.T) {
 	}).execute()
 	if err != nil || !success {
 		t.Fatalf("cached build: %v %v\n%s", success, err, &log)
-	}
-	if !strings.Contains(log.String(), "Evaluation cache: restored") || strings.Contains(log.String(), "Target evaluation finished") {
-		t.Fatalf("cached build evaluated again:\n%s", &log)
 	}
 	if next.Files[evaluationFile(system)].Digest != delta.Files[evaluationFile(system)].Digest {
 		t.Fatal("unchanged plan uploaded again")

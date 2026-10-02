@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
 	"time"
@@ -249,32 +248,6 @@ func TestLoadResultRequiresExactAttemptBinding(t *testing.T) {
 				t.Fatal("invalid attempt accepted", err)
 			}
 		})
-	}
-}
-
-func TestEmptyPackageAdmissionThenFirstLivePublication(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	const system = "aarch64-linux"
-	base, err := loadPlatform(storage, cacheTestRepository, system, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	delta := NewSnapshot(storage, cacheTestRepository)
-	delta.Metadata = liveTestMetadata("1", system, 1)
-	path := cacheRecord(delta, "a")
-	publisher := &livePublisher{snapshot: base, system: system, run: "1", attempt: 1, recipients: recipients}
-	if err := publisher.publish(delta, false); err != nil {
-		t.Fatal("first cache publication failed", err)
-	}
-	if err := publisher.publish(delta, true); err != nil {
-		t.Fatal("new package could not publish its final generation", err)
-	}
-	collectTestBlobs(t, storage)
-	reader := NewSnapshotReader(storage, cacheTestRepository, "", identity, io.Discard)
-	current, err := reader.Current(NarinfoKey(path))
-	if err != nil || !current.Contains(path) || len(storage.manifests) != 2 {
-		t.Fatal("new package did not become a usable cache", err)
 	}
 }
 

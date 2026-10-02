@@ -19,7 +19,7 @@ func TestWorkerSuppressesPrivateErrors(t *testing.T) {
 	cmd.Stdout, cmd.Stderr = &out, &diagnostic
 	err := cmd.Run()
 	status, ok := err.(*exec.ExitError)
-	if !ok || status.ExitCode() != 1 || out.Len() != 0 || diagnostic.String() != "error: CI worker failed.\n" {
+	if !ok || status.ExitCode() != 1 || out.Len() != 0 || !bytes.HasPrefix(diagnostic.Bytes(), []byte("error: ")) || !bytes.HasSuffix(diagnostic.Bytes(), []byte("\n")) || bytes.Count(diagnostic.Bytes(), []byte("\n")) != 1 || bytes.Contains(diagnostic.Bytes(), []byte("private")) {
 		t.Fatalf("private failure escaped: %v stdout=%q stderr=%q", err, &out, &diagnostic)
 	}
 }

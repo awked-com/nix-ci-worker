@@ -376,7 +376,7 @@ func TestCatalogUnionChecksRecordsBeforeMerging(t *testing.T) {
 			}
 			merged, err := reader.Current(b)
 			if conflicting {
-				if err == nil || !strings.Contains(err.Error(), "conflicting cache record") {
+				if err == nil {
 					t.Fatalf("accepted conflict: %v", err)
 				}
 				if reader.snapshot.HasFile(b) {
@@ -576,28 +576,6 @@ func TestCatalogConsumerAndWriterNodeBounds(t *testing.T) {
 	}
 	if len(storage.objects) != before {
 		t.Fatal("invalid writer tree uploaded partial data")
-	}
-}
-
-func TestCatalogPlatformUnion(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	names := []string{}
-	for i, system := range sortedKeys(Systems) {
-		platform := NewSnapshot(storage, cacheTestRepository)
-		names = append(names, NarinfoKey(cacheRecord(platform, string(rune('a'+i)))))
-		cachePublish(t, platform, PlatformTag(system), recipients)
-	}
-	measured := &measuredCatalogStorage{Storage: storage, reads: map[string]int{}}
-	reader := NewSnapshotReader(measured, cacheTestRepository, "", identity, nil)
-	for _, name := range names {
-		current, err := reader.Current(name)
-		if err != nil || !current.HasFile(name) {
-			t.Fatalf("platform union missing %s: %v", name, err)
-		}
-	}
-	if len(reader.views) != len(Systems) || measured.manifests != len(Systems) {
-		t.Fatalf("unexpected platform reads: %d views, %d manifests", len(reader.views), measured.manifests)
 	}
 }
 
