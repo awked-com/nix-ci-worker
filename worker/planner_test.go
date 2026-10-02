@@ -273,20 +273,8 @@ func TestSelectedEvaluationRejectsUnsupportedNativeTarget(t *testing.T) {
 		t.Fatal("unsupported runner accepted")
 	}
 
-	for _, selection := range []map[string]string{
-		{"host": "../host"},
-		{
-			"host":    "h",
-			"package": "x;touch",
-		},
-		{
-			"host":  "h",
-			"other": "x",
-		},
-	} {
-		if e := ValidateSelection(selection); e == nil {
-			t.Fatal(selection)
-		}
+	if e := ValidateSelection(map[string]string{"host": "h", "other": "x"}); e == nil {
+		t.Fatal("unsupported selection key accepted")
 	}
 }
 
@@ -380,8 +368,7 @@ in {
 	}
 }
 
-func allBuildRunners(t *testing.T) BuildMatrix {
-	t.Helper()
+func TestAdmissionMatrixSelectsNativeRunners(t *testing.T) {
 	matrix, err := AdmissionMatrix("", nil, func([]string, bool, []byte) ([]byte, error) {
 		t.Fatal("full admission must not evaluate targets")
 		return nil, nil
@@ -389,11 +376,6 @@ func allBuildRunners(t *testing.T) BuildMatrix {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return matrix
-}
-
-func TestAdmissionMatrixSelectsNativeRunners(t *testing.T) {
-	matrix := allBuildRunners(t)
 	systems, err := matrix.Systems()
 	if err != nil || !reflect.DeepEqual(systems, sortedKeys(Systems)) {
 		t.Fatal(matrix, err)

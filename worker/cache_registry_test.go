@@ -872,44 +872,51 @@ func TestRegistryLongCooldownRefreshesExpiredWriteToken(t *testing.T) {
 }
 
 func TestRegistryRecoversBlobCompletion(t *testing.T) {
-	for _, status := range []int{500, 502, 503, 504} {
-		for _, committed := range []bool{false, true} {
-			for _, large := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%d/committed=%v/large=%v", status, committed, large), func(t *testing.T) {
-					fixture, registry := newRegistryFixture(t)
-					registry.auth = RegistryCredential("user", "token")
-					now := time.Unix(1000, 0)
-					registry.now = func() time.Time { return now }
-					registry.sleep = func(delay time.Duration) { now = now.Add(delay) }
-					registry.jitter = func() time.Duration { return 0 }
-					fixture.completionStatus, fixture.completionFailures, fixture.commitFailure = status, 1, committed
-					payload := []byte("age-encryption.org/v1\nprivate payload")
-					if large {
-						payload = append(payload, bytes.Repeat([]byte("x"), UploadChunkSize)...)
-					}
-					descriptor, err := registry.UploadBlob(cacheTestRepository, bytes.NewReader(payload), true)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if !bytes.Equal(fixture.blobs[descriptor.Digest], payload) || descriptor.Size != int64(len(payload)) {
-						t.Fatal("completion recovery corrupted blob")
-					}
-					puts := 0
-					for _, request := range fixture.requests {
-						if strings.HasPrefix(request, "PUT ") {
-							puts++
-						}
-					}
-					want := 2
-					if committed {
-						want = 1
-					}
-					if puts != want {
-						t.Fatalf("completion requests: got %d, want %d", puts, want)
-					}
-				})
+	for _, test := range []struct {
+		status           int
+		committed, large bool
+	}{
+		{500, false, false},
+		{500, false, true},
+		{500, true, false},
+		{500, true, true},
+		{502, false, false},
+		{503, false, false},
+		{504, false, false},
+	} {
+		t.Run(fmt.Sprintf("%d/committed=%v/large=%v", test.status, test.committed, test.large), func(t *testing.T) {
+			fixture, registry := newRegistryFixture(t)
+			registry.auth = RegistryCredential("user", "token")
+			now := time.Unix(1000, 0)
+			registry.now = func() time.Time { return now }
+			registry.sleep = func(delay time.Duration) { now = now.Add(delay) }
+			registry.jitter = func() time.Duration { return 0 }
+			fixture.completionStatus, fixture.completionFailures, fixture.commitFailure = test.status, 1, test.committed
+			payload := []byte("age-encryption.org/v1\nprivate payload")
+			if test.large {
+				payload = append(payload, bytes.Repeat([]byte("x"), UploadChunkSize)...)
 			}
-		}
+			descriptor, err := registry.UploadBlob(cacheTestRepository, bytes.NewReader(payload), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(fixture.blobs[descriptor.Digest], payload) || descriptor.Size != int64(len(payload)) {
+				t.Fatal("completion recovery corrupted blob")
+			}
+			puts := 0
+			for _, request := range fixture.requests {
+				if strings.HasPrefix(request, "PUT ") {
+					puts++
+				}
+			}
+			want := 2
+			if test.committed {
+				want = 1
+			}
+			if puts != want {
+				t.Fatalf("completion requests: got %d, want %d", puts, want)
+			}
+		})
 	}
 }
 

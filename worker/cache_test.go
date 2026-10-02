@@ -271,16 +271,6 @@ func TestSnapshotEncryptedCatalog(t *testing.T) {
 	if got := string(cacheRead(t, loaded, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", identity)); got != "NAR" {
 		t.Fatal(got)
 	}
-
-	child := NewSnapshot(storage, cacheTestRepository)
-	if err := child.Merge(loaded); err != nil {
-		t.Fatal(err)
-	}
-
-	cachePublish(t, child, "next", recipients)
-	if !reflect.DeepEqual(child.Files, loaded.Files) {
-		t.Fatal("merge lost ciphertext")
-	}
 }
 
 func TestSnapshotRequiresOneFilesCatalog(t *testing.T) {

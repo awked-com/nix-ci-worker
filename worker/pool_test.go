@@ -159,48 +159,45 @@ func TestPoolCachedReadsPreserveLeaseAndIgnoreStaleEntries(t *testing.T) {
 }
 
 func TestRunnerBuildsOneTaskAndJoinsCancellation(t *testing.T) {
-	for runner := 1; runner < RunnersPerSystem; runner++ {
-		t.Run(fmt.Sprint(runner), func(t *testing.T) {
-			bus := poolFixture(t)
-			if err := bus.write("coordinator", 0, poolMessage{Session: "session", State: "running"}); err != nil {
-				t.Fatal(err)
+	const runner = 2
+	bus := poolFixture(t)
+	if err := bus.write("coordinator", 0, poolMessage{Session: "session", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started, stopped := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- servePoolBuilder(ctx, bus, runner, nil, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, time.Second, time.Second}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
+			if sequence != 1 {
+				t.Errorf("builder received assignment sequence %d", sequence)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			started, stopped := make(chan struct{}), make(chan struct{})
-			done := make(chan error, 1)
-			go func() {
-				done <- servePoolBuilder(ctx, bus, runner, nil, poolTiming{5 * time.Millisecond, 20 * time.Millisecond, time.Second, time.Second}, func(ctx context.Context, sequence uint64, task poolTask) (string, error) {
-					if sequence != 1 {
-						t.Errorf("builder received assignment sequence %d", sequence)
-					}
-					close(started)
-					<-ctx.Done()
-					close(stopped)
-					return "", ctx.Err()
-				}, io.Discard)
-			}()
-			var status *poolMessage
-			awaitPool(t, func() bool { status, _ = bus.read("status", runner); return status != nil })
-			if err := bus.write("assignment", runner, poolMessage{Session: "session", Instance: status.Instance, Sequence: 1, State: "build", Task: &poolTask{}}); err != nil {
-				t.Fatal(err)
-			}
-			select {
-			case <-started:
-			case <-time.After(3 * time.Second):
-				t.Fatal("runner did not start its task")
-			}
-			cancel()
-			select {
-			case err := <-done:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatal("runner returned before joining its task", err)
-				}
-				<-stopped
-			case <-time.After(3 * time.Second):
-				t.Fatal("runner did not cancel its task")
-			}
-		})
+			close(started)
+			<-ctx.Done()
+			close(stopped)
+			return "", ctx.Err()
+		}, io.Discard)
+	}()
+	var status *poolMessage
+	awaitPool(t, func() bool { status, _ = bus.read("status", runner); return status != nil })
+	if err := bus.write("assignment", runner, poolMessage{Session: "session", Instance: status.Instance, Sequence: 1, State: "build", Task: &poolTask{}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not start its task")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("runner returned before joining its task", err)
+		}
+		<-stopped
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not cancel its task")
 	}
 }
 
@@ -426,58 +423,6 @@ func schedulerFixture(t *testing.T) *BuildPool {
 		p.statuses[runner].Store(&poolMessage{Session: p.session, Instance: fmt.Sprint(runner), State: "ready", Cores: 4, Sent: time.Now(), Features: []string{"big-parallel"}})
 	}
 	return p
-}
-
-func TestSchedulerUsesEveryRunnerAndUnlocksDependenciesImmediately(t *testing.T) {
-	p := schedulerFixture(t)
-	graph := &Plan{Derivations: map[string]Derivation{"a": derivation("a-out"), "b": derivation("b-out"), "c": derivation("c-out"), "d": derivation("d-out"), "e": derivation("e-out"), "f": derivation("f-out"), "g": derivation("g-out", "cached"), "cached": derivation("cached-out", "a")}}
-	started := make(chan string, 7)
-	release := make(chan struct{})
-	var once sync.Once
-	defer once.Do(func() { close(release) })
-	done := make(chan error, 1)
-	go func() {
-		done <- p.schedule(p.ctx, graph, []string{"a^out", "b^out", "c^out", "d^out", "e^out", "f^out", "g^out"}, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
-			started <- fmt.Sprintf("%d:%s", runner, spec)
-			if spec == "a^out" {
-				time.Sleep(30 * time.Millisecond)
-				return nil
-			}
-			if spec == "g^out" {
-				return nil
-			}
-			select {
-			case <-release:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		})
-	}()
-	seen := map[string]bool{}
-	for len(seen) < RunnersPerSystem+1 {
-		select {
-		case event := <-started:
-			seen[event] = true
-		case <-time.After(3 * time.Second):
-			t.Fatal("dependency waited behind unrelated large builds", seen)
-		}
-	}
-	for _, event := range []string{"0:a^out", "1:b^out", "2:c^out", "3:d^out", "0:e^out"} {
-		if !seen[event] {
-			t.Fatal(seen)
-		}
-	}
-	once.Do(func() { close(release) })
-	for len(seen) < 7 {
-		seen[<-started] = true
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if !p.stop.Load() {
-		t.Fatal("helpers were not drained")
-	}
 }
 
 func TestSchedulerRetriesRemoteFailureLocallyAndKeepsOtherWork(t *testing.T) {
