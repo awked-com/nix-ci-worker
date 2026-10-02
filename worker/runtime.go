@@ -1,8 +1,6 @@
 package worker
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -29,12 +27,6 @@ func NativeSystem() (string, error) {
 	}
 
 	return s, nil
-}
-
-func equivalent(a, b any) bool {
-	x, _ := json.Marshal(a)
-	y, _ := json.Marshal(b)
-	return bytes.Equal(x, y)
 }
 
 func takeEnv(name string) string {

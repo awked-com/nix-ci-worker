@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -147,7 +146,7 @@ func sortedKeys[V any](m map[string]V) []string {
 		r = append(r, k)
 	}
 
-	sort.Strings(r)
+	slices.Sort(r)
 	return r
 }
 
@@ -236,7 +235,7 @@ func (p *Plan) Batches(missing []string, limit int) ([][]string, error) {
 	ordered := []string{}
 	visited := 0
 	for len(ready) > 0 {
-		sort.Strings(ready)
+		slices.Sort(ready)
 		drv := ready[0]
 		ready = ready[1:]
 		visited++

@@ -57,7 +57,7 @@ type poolEnvelope struct {
 }
 
 // Coordination holds only encrypted control records. Build inputs and outputs
-// continue to use Storage so cache retention does not affect live leases.
+// use Storage; expiring coordination messages cannot remove cached outputs.
 type coordinationStore interface {
 	Write(key string, data []byte) error
 	Read(prefix, previous string) (key string, data []byte, err error)

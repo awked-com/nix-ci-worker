@@ -731,7 +731,7 @@ func RunWorker(log io.Writer) error {
 	attempt, e := strconv.Atoi(os.Getenv("GITHUB_RUN_ATTEMPT"))
 	validMode := mode == "admit" || mode == "build" || mode == "builder"
 	_, native := Systems[system]
-	if e != nil || attempt < 1 || !validRetentionRun(run) || !validMode || ((mode == "build" || mode == "builder") && !native) {
+	if e != nil || attempt < 1 || !validRunID(run) || !validMode || ((mode == "build" || mode == "builder") && !native) {
 		return errors.New("invalid worker inputs")
 	}
 

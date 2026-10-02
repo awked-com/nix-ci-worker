@@ -1,7 +1,5 @@
 # Nix CI worker
 
-Run a command with `--help` for usage.
-
 ## Build and test
 
 Use Go 1.25.8 or newer:
@@ -18,14 +16,12 @@ with `nix`, `nix-store`, and `nix-instantiate` on PATH:
 INFRA_NATIVE_NIX_TESTS=1 go test ./worker -run '^TestNative' -count=1
 ```
 
-The native tests create temporary Nix derivations and store paths. The planner
-requires Nix's version 4 derivation JSON schema (`nix derivation show`), and cache
-queries use `nix path-info --json-format 1`. Use a Nix release supporting both
-interfaces.
+Tests create temporary derivations and store paths. Nix must support version 4
+derivation JSON (`nix derivation show`) and `nix path-info --json-format 1`.
 
 ## Serve an encrypted cache
 
-Create a JSON configuration with your GHCR package and cache reference:
+Create `cache.json`:
 
 ```json
 {
@@ -38,21 +34,19 @@ Create a JSON configuration with your GHCR package and cache reference:
 ./bin/nix-ci-worker cache --config cache.json --identity /path/to/age-key --port 8080
 ```
 
-The server listens on IPv4 loopback. Point a Nix substituter at
-`http://127.0.0.1:8080` and configure the public signing key matching your cache.
-The identity file is an age identity, reloaded for catalog and NAR decryption.
-This command reads registry objects anonymously, so the package must allow
-anonymous reads; payloads remain encrypted. SIGINT or SIGTERM stops the server.
+Point a Nix substituter at `http://127.0.0.1:8080` with the cache’s public signing
+key. The server listens on IPv4 loopback and reloads the age identity for each
+decryption. The GHCR package must allow anonymous reads; payloads stay encrypted.
+SIGINT or SIGTERM stops the server. Use `--help` for command syntax.
 
 ## Run builds
 
-CI supports x86_64-linux and aarch64-linux, with one coordinator and three helpers
-per platform. Install Nix on each runner. Full builds evaluate `hydraJobs.<system>` in the
-source flake. Select host system derivations and required checks there; their
-transitive dependencies determine which packages need building on each platform.
-Optional host/package selection follows NixOS configuration attributes.
+Use the [CI workflow](https://github.com/awked-com/infra-ci) with Nix installed on
+each runner. It runs one coordinator and three helpers on each of x86_64-linux
+and aarch64-linux. Full builds evaluate `hydraJobs.<system>`; put required systems
+and checks there. Host/package selections follow NixOS configuration attributes.
 
-The workflow supplies these environment variables:
+The worker reads these environment variables:
 
 | Variable | Meaning |
 | --- | --- |
@@ -72,29 +66,19 @@ The workflow supplies these environment variables:
 | `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` | Actions run identity |
 | `GITHUB_OUTPUT` | Actions output file used by admission |
 
-The storage owner/package must match `GITHUB_REPOSITORY`. Retry jobs with the
-admitted matrices and source revision. The workflow must serialize builds for
-the cache package; each coordinator loads and updates its platform's cumulative
-cache head. Coordinators batch head updates on a 30-second publication cadence
-while runners continue independent builds. Completion and disk reclamation force
-pending outputs into the head. Outputs become available during builds.
+The storage owner/package must match `GITHUB_REPOSITORY`. Serialize builds for
+that package and retry with the admitted matrices and source revision. Launch
+through a JavaScript action to inherit GitHub’s job-scoped cache credentials.
+Helpers must not receive the final signing key.
 
-Each platform head retains all previously cached outputs. Publication tags every
-new generation before advancing the head. Historical generations, results, and
-helper snapshots remain available permanently; the worker never deletes registry
-versions or evicts old outputs. Registry storage grows with retained history.
-Publication and admission do not depend on package cleanup or package Admin access.
+Each coordinator updates its cumulative platform cache every 30 seconds, with
+forced publication at completion and before disk reclamation. Every generation
+is tagged before advancing the head. Outputs, historical generations, results,
+and helper snapshots are retained permanently; registry storage grows over time.
+Publication needs no package Admin access.
 
-Coordinators and helpers exchange small encrypted, authenticated messages
-through GitHub Actions cache v2. The workflow must launch the worker from a
-JavaScript action so it inherits GitHub's short-lived runtime credentials;
-ordinary shell steps do not receive them automatically.
-
-Coordination messages are bound to the request, source revision, run, attempt,
-platform, and runner. Missing or expired messages return work to the coordinator.
-Terminal encrypted results include coordinator request counts and write-throttle
-wait time under `coordination`.
-
-Helpers must not receive the final cache signing key. The worker removes
-credential environment variables before executing build subprocesses and
-suppresses private failure details in its top-level error output.
+Coordination messages are encrypted and bound to the request, revision, run,
+attempt, platform, and runner. Missing or expired messages return work to the
+coordinator. Terminal results include request counts and throttle wait time under
+`coordination`. Build subprocesses receive no credential environment variables;
+top-level errors suppress private failure details.

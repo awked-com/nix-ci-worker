@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
@@ -76,7 +77,7 @@ func loadEvaluation(source, system, key string, parent *Snapshot, identity, sign
 		return nil, errors.New("missing cached evaluation plan")
 	}
 	plan, err := NewPlan(saved.Plan.Targets, saved.Plan.Derivations, sortedKeys(saved.Plan.Required))
-	if err != nil || !equivalent(plan, saved.Plan) {
+	if err != nil || !reflect.DeepEqual(plan, saved.Plan) {
 		return nil, errors.New("invalid cached evaluation plan")
 	}
 	if _, err := plan.Batches(nil, 1); err != nil {

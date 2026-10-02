@@ -342,14 +342,6 @@ func (s *Snapshot) Publish(tag string, recipients Secret) (string, error) {
 	if err := s.ValidateRecords(); err != nil {
 		return "", err
 	}
-	retention := snapshotRetention(s.Metadata)
-	var retentionJSON []byte
-	if retention.Kind != "" {
-		if err := retention.validate(); err != nil {
-			return "", err
-		}
-		retentionJSON, _ = json.Marshal(retention)
-	}
 	layers := map[string]Descriptor{}
 	for _, file := range s.Files {
 		if err := file.validate(); err != nil {
@@ -390,9 +382,6 @@ func (s *Snapshot) Publish(tag string, recipients Secret) (string, error) {
 			"org.opencontainers.image.source": "https://github.com/" + strings.TrimPrefix(s.Repository, "ghcr.io/"),
 			CatalogTitle:                      "NixOS binary cache",
 		},
-	}
-	if len(retentionJSON) != 0 {
-		s.Manifest.Annotations[retentionAnnotation] = string(retentionJSON)
 	}
 	body, err := json.Marshal(s.Manifest)
 	if err != nil {

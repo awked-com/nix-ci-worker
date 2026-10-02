@@ -7,8 +7,14 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"strconv"
 	"time"
 )
+
+func validRunID(id string) bool {
+	number, err := strconv.ParseUint(id, 10, 64)
+	return err == nil && number > 0
+}
 
 func PlatformTag(system string) string { return "nixos-cache-" + system }
 
@@ -42,7 +48,7 @@ func platformTags() []string {
 }
 
 func resultFile(run, system string, attempt int) (string, error) {
-	if !validRetentionRun(run) || attempt < 1 {
+	if !validRunID(run) || attempt < 1 {
 		return "", errors.New("invalid build result identity")
 	}
 	if _, ok := Systems[system]; !ok {
@@ -160,7 +166,7 @@ func (p *livePublisher) publish(delta *Snapshot, terminal bool) error {
 
 func (p *livePublisher) update(delta *Snapshot, terminal bool) error {
 	started := time.Now()
-	if _, ok := Systems[p.system]; !ok || !validRetentionRun(p.run) || p.attempt < 1 {
+	if _, ok := Systems[p.system]; !ok || !validRunID(p.run) || p.attempt < 1 {
 		return errors.New("invalid cache publication identity")
 	}
 	if err := p.snapshot.Merge(delta); err != nil {
