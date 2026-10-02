@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -284,39 +283,6 @@ func TestPoolForcesPendingHeadBeforeReturning(t *testing.T) {
 				})
 			if !forced || fail && (!errors.Is(err, publicationError) || !errors.Is(err, errPoolPublication)) || !fail && err != nil {
 				t.Fatal("pool returned without a successful final head or its publication error", forced, err)
-			}
-		})
-	}
-}
-
-func BenchmarkSchedulerPublicationPipeline(b *testing.B) {
-	for _, pipelined := range []bool{false, true} {
-		b.Run(fmt.Sprintf("pipelined=%v", pipelined), func(b *testing.B) {
-			for b.Loop() {
-				pool := &BuildPool{cpus: 1, timing: poolTiming{poll: time.Hour}, bus: &poolBus{system: "x86_64-linux"}, ctx: context.Background(), log: io.Discard}
-				graph := &Plan{Derivations: map[string]Derivation{}}
-				missing := []string{}
-				for n := range 8 {
-					drv := fmt.Sprint(n)
-					graph.Derivations[drv] = derivation(drv + "-out")
-					missing = append(missing, drv+"^out")
-				}
-				var publication sync.Mutex
-				if err := pool.schedule(pool.ctx, graph, missing, func(ctx context.Context, runner int, spec string, remote poolMessage, releaseRunner func()) error {
-					if runner != 0 || !strings.HasSuffix(spec, "^out") {
-						b.Fatal("invalid benchmark assignment", runner, spec)
-					}
-					time.Sleep(10 * time.Millisecond)
-					if pipelined {
-						releaseRunner()
-					}
-					publication.Lock()
-					defer publication.Unlock()
-					time.Sleep(15 * time.Millisecond)
-					return nil
-				}); err != nil {
-					b.Fatal(err)
-				}
 			}
 		})
 	}

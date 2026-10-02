@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -85,37 +84,4 @@ func TestSnapshotIndexValidatesNewRecords(t *testing.T) {
 			t.Fatal("invalid snapshot indexed")
 		}
 	}
-}
-
-func BenchmarkSnapshotUpdates(b *testing.B) {
-	parent := NewSnapshot(newMemoryCache(), cacheTestRepository)
-	for n := range 10000 {
-		path := fmt.Sprintf("/nix/store/%032d-fixture", n)
-		archive := fmt.Sprintf("nar/%064x.nar.zst", n)
-		parent.Files["cache/"+archive] = wholeFile(Descriptor{Digest: fmt.Sprintf("sha256:%064x", n), Size: 3})
-		parent.Narinfos[NarinfoKey(path)] = fmt.Sprintf("StorePath: %s\nURL: %s\nCompression: zstd\nNarHash: sha256:abc\nNarSize: 3\nReferences: \nSig: test:signature\n", path, archive)
-	}
-	delta := NewSnapshot(parent.Storage, parent.Repository)
-	cacheRecord(delta, "a")
-	b.Run("full merge", func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			if _, err := CacheUnion(parent, delta); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.Run("indexed update", func(b *testing.B) {
-		base, err := newSnapshotIndex(parent)
-		if err != nil {
-			b.Fatal(err)
-		}
-		b.ReportAllocs()
-		for b.Loop() {
-			index := *base
-			if _, err := index.extend(delta); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
 }

@@ -105,6 +105,17 @@ func TestPackedArchivesRoundTripAndRetainSharedBlobs(t *testing.T) {
 	}
 }
 
+type stalledCache struct {
+	*memoryCache
+	once             sync.Once
+	started, release chan struct{}
+}
+
+func (s *stalledCache) UploadBlob(repository string, source io.Reader, encrypted bool) (Descriptor, error) {
+	s.once.Do(func() { close(s.started); <-s.release })
+	return s.memoryCache.UploadBlob(repository, source, encrypted)
+}
+
 func TestPackingContinuesWhilePreviousPackUploads(t *testing.T) {
 	identity, recipients := cacheKeys(t)
 	storage := &stalledCache{memoryCache: newMemoryCache(), started: make(chan struct{}), release: make(chan struct{})}

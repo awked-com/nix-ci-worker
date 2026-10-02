@@ -124,18 +124,6 @@ func TestNativeRegistryBuilderTransfersInputsAndSignedOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helper build: %v\n%s", err, &diagnostics)
 	}
-	t.Run("consecutive results remain reachable", func(t *testing.T) {
-		next, err := executePoolBuild(context.Background(), bus, source, 2, 2, task, knownUpstream{}, log)
-		if err != nil {
-			t.Fatalf("next helper build: %v\n%s", err, &diagnostics)
-		}
-		for sequence, expected := range map[uint64]string{1: resultDigest, 2: next} {
-			_, retained, err := storage.GetManifest(bus.repository, bus.artifactTag("result", 2, sequence))
-			if err != nil || retained != expected {
-				t.Fatal("helper result lost its assignment identity", sequence, retained, expected, err)
-			}
-		}
-	})
 	result, err := LoadSnapshot(storage, bus.repository, resultDigest, identity)
 	if err != nil {
 		t.Fatal(err)

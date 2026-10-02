@@ -422,12 +422,7 @@ func TestAdmissionMatrixSelectsNativeRunners(t *testing.T) {
 	}
 }
 
-func TestAdmissionRejectsInvalidSelectionsAndEvaluation(t *testing.T) {
-	for _, value := range []any{nil, map[string]string{}, map[string]string{"host": "../host"}, map[string]any{"host": 1}, "host"} {
-		if _, err := buildSelection(map[string]any{"selection": value}); err == nil {
-			t.Fatalf("invalid selection accepted: %v", value)
-		}
-	}
+func TestAdmissionRejectsInvalidEvaluation(t *testing.T) {
 	for _, output := range []string{`"unsupported"`, `""`, `null`, `{}`, `invalid`} {
 		matrix, err := AdmissionMatrix(t.TempDir(), map[string]string{"host": "host"}, func([]string, bool, []byte) ([]byte, error) {
 			return []byte(output), nil

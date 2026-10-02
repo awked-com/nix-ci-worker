@@ -399,22 +399,6 @@ func ValidateSelection(s map[string]string) error {
 	return nil
 }
 
-func buildSelection(metadata map[string]any) (map[string]string, error) {
-	v, ok := metadata["selection"]
-	if !ok {
-		return nil, nil
-	}
-	b, e := json.Marshal(v)
-	if e != nil {
-		return nil, e
-	}
-	var selection map[string]string
-	if e = json.Unmarshal(b, &selection); e != nil {
-		return nil, e
-	}
-	return selection, ValidateSelection(selection)
-}
-
 func selectedAttribute(s map[string]string) (string, string, error) {
 	if e := ValidateSelection(s); e != nil {
 		return "", "", e

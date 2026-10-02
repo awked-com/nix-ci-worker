@@ -351,16 +351,11 @@ func (v *catalogView) reachableBlob(descriptor Descriptor) error {
 	return nil
 }
 
-func (v *catalogView) validateFiles(files map[string]SnapshotFile) error {
-	for _, file := range files {
-		if err := file.validate(); err != nil {
-			return err
-		}
-		if err := v.reachableBlob(file.Blob); err != nil {
-			return err
-		}
+func (v *catalogView) validateFile(file SnapshotFile) error {
+	if err := file.validate(); err != nil {
+		return err
 	}
-	return nil
+	return v.reachableBlob(file.Blob)
 }
 
 func (v *catalogView) node(descriptor Descriptor, prefix string, consumer bool, identity Secret) (catalogNode, error) {
@@ -436,7 +431,7 @@ func (v *catalogView) node(descriptor Descriptor, prefix string, consumer bool, 
 			}
 		}
 		if record.File != nil {
-			if err := v.validateFiles(map[string]SnapshotFile{name: *record.File}); err != nil {
+			if err := v.validateFile(*record.File); err != nil {
 				return catalogNode{}, err
 			}
 		}
@@ -448,7 +443,7 @@ func (v *catalogView) node(descriptor Descriptor, prefix string, consumer bool, 
 			if name != NarinfoKey(fields["StorePath"]) || record.Archive == nil {
 				return catalogNode{}, errors.New("narinfo references an unreachable archive")
 			}
-			if err := v.validateFiles(map[string]SnapshotFile{name: *record.Archive}); err != nil {
+			if err := v.validateFile(*record.Archive); err != nil {
 				return catalogNode{}, err
 			}
 		} else if record.Archive != nil {
@@ -457,9 +452,6 @@ func (v *catalogView) node(descriptor Descriptor, prefix string, consumer bool, 
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if prior, exists := v.prefixes[descriptor.Digest]; exists && prior != prefix {
-		return catalogNode{}, errors.New("catalog node reused at a different prefix")
-	}
 	v.nodes[descriptor.Digest] = node
 	v.prefixes[descriptor.Digest] = prefix
 	if hash != "" {

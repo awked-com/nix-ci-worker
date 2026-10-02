@@ -275,6 +275,7 @@ type buildSecrets struct {
 
 type nativeBuild struct {
 	source, system, run string
+	selection           map[string]string
 	attempt             int
 	parent, delta       *Snapshot
 	secrets             buildSecrets
@@ -404,12 +405,7 @@ func (b nativeBuild) execute() (bool, error) {
 		return NixRun(source, log, args, capture, data)
 	}
 
-	selection, e := buildSelection(delta.Metadata)
-	if e != nil {
-		return false, e
-	}
-
-	planKey, e := sourceEvaluationKey(source, system, selection, nix)
+	planKey, e := sourceEvaluationKey(source, system, b.selection, nix)
 	if e != nil {
 		return false, e
 	}
@@ -419,7 +415,7 @@ func (b nativeBuild) execute() (bool, error) {
 	}
 	planFile, reusedPlan := parent.Files[evaluationFile(system)], graph != nil
 	if graph == nil {
-		graph, e = Evaluate(source, system, nix, selection, log)
+		graph, e = Evaluate(source, system, nix, b.selection, log)
 		if e != nil {
 			return false, e
 		}
@@ -859,7 +855,7 @@ func RunWorker(log io.Writer) error {
 	pool := StartBuildPool(bus, log)
 	defer pool.Close()
 	success, e := (nativeBuild{
-		source: source, system: system, run: run, attempt: attempt,
+		source: source, system: system, run: run, attempt: attempt, selection: submitted.Selection,
 		parent: parent, delta: delta, pool: pool, log: log,
 		live: &livePublisher{snapshot: parent, system: system, run: run, attempt: attempt,
 			recipients: recipients, log: log},
