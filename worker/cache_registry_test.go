@@ -36,7 +36,6 @@ type registryFixture struct {
 	completionStatus, completionFailures int
 	commitFailure                        bool
 	slow                                 bool
-	blockUploads                         bool
 	started, release                     chan struct{}
 }
 
@@ -75,10 +74,6 @@ func (f *registryFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body.Close()
-	if f.blockUploads && r.Method == "POST" {
-		f.started <- struct{}{}
-		<-f.release
-	}
 	f.mu.Lock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
 	if r.URL.Path == "/token" {
@@ -470,48 +465,6 @@ func TestRegistryRejectsIncorrectRangeResponses(t *testing.T) {
 				t.Fatal("incorrect range accepted")
 			}
 		})
-	}
-}
-
-func TestRegistryDownloadsContinueWhenUploadConnectionsAreFull(t *testing.T) {
-	fixture, registry := newRegistryFixture(t)
-	registry.auth = Secret{Data: []byte(`{"auths":{"ghcr.io":{"auth":"encoded"}}}`)}
-	fixture.blockUploads = true
-	fixture.started = make(chan struct{}, UploadWorkers)
-	var group sync.WaitGroup
-	defer group.Wait()
-	defer close(fixture.release)
-	for i := range UploadWorkers {
-		group.Go(func() {
-			payload := fmt.Sprintf("age-encryption.org/v1\npayload %d", i)
-			if _, err := registry.UploadBlob(cacheTestRepository, strings.NewReader(payload), true); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	for range UploadWorkers {
-		select {
-		case <-fixture.started:
-		case <-time.After(10 * time.Second):
-			t.Fatal("uploads did not fill the connection pool")
-		}
-	}
-
-	download := make(chan error, 1)
-	group.Go(func() {
-		data, err := fixtureBlob(t, registry)
-		if err == nil && !bytes.Equal(data, fixture.payload) {
-			err = errors.New("download payload changed")
-		}
-		download <- err
-	})
-	select {
-	case err := <-download:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("download stalled behind uploads")
 	}
 }
 

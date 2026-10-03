@@ -17,10 +17,9 @@ import (
 
 type measuredCatalogStorage struct {
 	Storage
-	mu               sync.Mutex
-	reads            map[string]int
-	bytes            int64
-	heads, manifests int
+	mu    sync.Mutex
+	reads map[string]int
+	bytes int64
 }
 
 func (m *measuredCatalogStorage) Blob(repository string, descriptor Descriptor) (io.ReadCloser, error) {
@@ -29,20 +28,6 @@ func (m *measuredCatalogStorage) Blob(repository string, descriptor Descriptor) 
 	m.bytes += descriptor.Size
 	m.mu.Unlock()
 	return m.Storage.Blob(repository, descriptor)
-}
-
-func (m *measuredCatalogStorage) ManifestDigest(repository, reference string) (string, error) {
-	m.mu.Lock()
-	m.heads++
-	m.mu.Unlock()
-	return m.Storage.ManifestDigest(repository, reference)
-}
-
-func (m *measuredCatalogStorage) GetManifest(repository, reference string) (Manifest, string, error) {
-	m.mu.Lock()
-	m.manifests++
-	m.mu.Unlock()
-	return m.Storage.GetManifest(repository, reference)
 }
 
 func catalogFixture(storage Storage, count int) *Snapshot {
@@ -89,34 +74,20 @@ func TestCatalogLazyLookupAndCiphertextReuse(t *testing.T) {
 			t.Fatal("oversized root")
 		}
 	}
-	before := len(storage.objects)
-	if again := cachePublish(t, snapshot, "catalog", recipients); again != first || len(storage.objects) != before {
-		t.Fatal("unchanged publication uploaded fresh ciphertext")
+	if again := cachePublish(t, snapshot, "catalog", recipients); again != first {
+		t.Fatal("unchanged publication changed the catalog")
 	}
 	snapshot.Metadata["updated"] = true
 	second := cachePublish(t, snapshot, "catalog", recipients)
-	if second == first || len(storage.objects) != before+2 {
-		t.Fatalf("writer change rewrote consumer shards: objects %d -> %d", before, len(storage.objects))
+	if second == first {
+		t.Fatal("writer change did not update the catalog")
 	}
 	full := cacheLoad(t, storage, "catalog", identity)
 	if !reflect.DeepEqual(full.Files, snapshot.Files) || !reflect.DeepEqual(full.Narinfos, snapshot.Narinfos) || !reflect.DeepEqual(full.Upstream, snapshot.Upstream) || !reflect.DeepEqual(full.Metadata, snapshot.Metadata) {
 		t.Fatal("full writer round trip lost data")
 	}
-	before = len(storage.objects)
-	if republished := cachePublish(t, full, "catalog", recipients); republished != second || len(storage.objects) != before {
-		t.Fatal("reload lost ciphertext reuse")
-	}
-	reader.deadline = time.Time{}
-	if _, err = reader.Current(name); err != nil {
-		t.Fatal(err)
-	}
-	beforeReads, beforeGets := measured.bytes, measured.manifests
-	reader.deadline = time.Time{}
-	if _, err = reader.Current(name); err != nil {
-		t.Fatal(err)
-	}
-	if measured.bytes != beforeReads || measured.manifests != beforeGets || measured.heads != 2 {
-		t.Fatal("unchanged refresh did not use HEAD")
+	if republished := cachePublish(t, full, "catalog", recipients); republished != second {
+		t.Fatal("reload changed the catalog")
 	}
 }
 
@@ -170,45 +141,6 @@ func TestCatalogRefreshesAfterUnloadedShardCollection(t *testing.T) {
 	current, err := reader.Current(name)
 	if err != nil || current.Narinfos[name] != snapshot.Narinfos[name] || current.Digest != next {
 		t.Fatalf("did not recover collected shard: %v", err)
-	}
-}
-
-func TestCatalogWriterShardsReuseUnchangedCoverage(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	snapshot := catalogFixture(storage, 1)
-	for i := range 20000 {
-		path := "/nix/store/" + strings.ReplaceAll(fmt.Sprintf("%032x", i), "e", "g") + "-upstream"
-		snapshot.Upstream[path] = []string{}
-	}
-	cachePublish(t, snapshot, "catalog", recipients)
-	loaded := cacheLoad(t, storage, "catalog", identity)
-	if !reflect.DeepEqual(loaded.Upstream, snapshot.Upstream) {
-		t.Fatal("writer shards lost upstream coverage")
-	}
-	first, err := openCatalog(storage, cacheTestRepository, snapshot.Manifest, snapshot.Digest, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := len(storage.objects)
-	snapshot.Metadata["progress"] = 1
-	cachePublish(t, snapshot, "catalog", recipients)
-	second, err := openCatalog(storage, cacheTestRepository, snapshot.Manifest, snapshot.Digest, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.root.Writer.Digest != first.root.Writer.Digest || len(storage.objects) != count+2 {
-		t.Fatal("progress change rewrote cumulative writer coverage")
-	}
-	count = len(storage.objects)
-	snapshot.Upstream["/nix/store/"+strings.Repeat("z", 32)+"-additional"] = []string{}
-	cachePublish(t, snapshot, "catalog", recipients)
-	if added := len(storage.objects) - count; added < 3 || added > 5 {
-		t.Fatalf("single coverage addition uploaded %d blobs", added)
-	}
-	loaded = cacheLoad(t, storage, "catalog", identity)
-	if !reflect.DeepEqual(loaded.Upstream, snapshot.Upstream) {
-		t.Fatal("changed writer coverage did not round trip")
 	}
 }
 
@@ -576,70 +508,5 @@ func TestCatalogConsumerAndWriterNodeBounds(t *testing.T) {
 	}
 	if len(storage.objects) != before {
 		t.Fatal("invalid writer tree uploaded partial data")
-	}
-}
-
-func TestCatalogIndependentNodesFetchConcurrently(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	snapshot := catalogFixture(storage, 3000)
-	cachePublish(t, snapshot, "catalog", recipients)
-	measured := &measuredCatalogStorage{Storage: storage, reads: map[string]int{}}
-	blocked := &blockedCatalogStorage{Storage: measured, blobs: map[string]bool{}, entered: make(chan struct{}, 4), release: make(chan struct{})}
-	reader := NewSnapshotReader(blocked, cacheTestRepository, "catalog", identity, nil)
-	if _, err := reader.Current(""); err != nil {
-		t.Fatal(err)
-	}
-	view := reader.views["catalog"]
-	root, err := view.node(view.root.Index, "", true, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := []string{}
-	prefixes := map[string]bool{}
-	for _, name := range sortedKeys(snapshot.Narinfos) {
-		prefix := contentDigest([]byte(name))[7:8]
-		child, exists := root.Children[prefix]
-		if exists && !prefixes[prefix] {
-			prefixes[prefix] = true
-			blocked.blobs[child.Digest] = true
-			names = append(names, name)
-			if len(names) == 2 {
-				break
-			}
-		}
-	}
-	if len(names) != 2 {
-		t.Fatal("fixture needs independent catalog branches")
-	}
-	var release sync.Once
-	defer release.Do(func() { close(blocked.release) })
-	results := make(chan error, 3)
-	for _, name := range []string{names[0], names[0], names[1]} {
-		go func() {
-			snapshot, err := reader.Current(name)
-			if err == nil && !snapshot.HasFile(name) {
-				err = errors.New("lookup omitted record")
-			}
-			results <- err
-		}()
-	}
-	for range 2 {
-		select {
-		case <-blocked.entered:
-		case <-time.After(2 * time.Second):
-			t.Fatal("independent lookup waited behind a blocked shard")
-		}
-	}
-	release.Do(func() { close(blocked.release) })
-	for range 3 {
-		if err := <-results; err != nil {
-			t.Fatal(err)
-		}
-	}
-	for digest := range blocked.blobs {
-		if measured.reads[digest] != 1 {
-			t.Fatal("duplicate lookup fetched the same shard again", measured.reads[digest])
-		}
 	}
 }

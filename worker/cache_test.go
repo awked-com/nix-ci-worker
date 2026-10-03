@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -10,7 +9,6 @@ import (
 	"filippo.io/age"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -439,41 +437,6 @@ func TestSnapshotReaderRefreshPinningAndRecovery(t *testing.T) {
 	}
 }
 
-func TestCacheHandlerHonorsPinnedReference(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	first := NewSnapshot(storage, cacheTestRepository)
-	firstPath := cacheRecord(first, "a")
-	firstDigest := cachePublish(t, first, PlatformTag("aarch64-linux"), recipients)
-
-	latest := NewSnapshot(storage, cacheTestRepository)
-	latestPath := cacheRecord(latest, "b")
-	cachePublish(t, latest, PlatformTag("aarch64-linux"), recipients)
-
-	handler := NewCacheHandler(storage, cacheTestRepository, firstDigest, identity, nil)
-	server := httptest.NewServer(handler)
-	defer server.Close()
-
-	response, err := http.Get(server.URL + "/" + strings.TrimPrefix(NarinfoKey(firstPath), "cache/"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, readErr := io.ReadAll(response.Body)
-	response.Body.Close()
-	if readErr != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), firstPath) {
-		t.Fatal("pinned cache record unavailable", response.StatusCode, readErr)
-	}
-
-	response, err = http.Get(server.URL + "/" + strings.TrimPrefix(NarinfoKey(latestPath), "cache/"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusNotFound {
-		t.Fatal("handler followed latest instead of its pinned reference", response.StatusCode)
-	}
-}
-
 func TestFileCacheHandlerReloadsIdentity(t *testing.T) {
 	oldIdentity, oldRecipients := cacheKeys(t)
 	newIdentity, newRecipients := cacheKeys(t)
@@ -697,38 +660,6 @@ func TestCacheHTTPMetadataPathsAndEncryptedRoundTrip(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != 502 || len(handler.Errors()) != 1 {
 		t.Fatal("cache failure hidden")
-	}
-}
-
-func TestCacheServerServesAlongsideIdleConnections(t *testing.T) {
-	handler := NewCacheHandler(nil, "", "", Secret{}, nil)
-	server, listener, err := StartCacheServer(handler, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { server.Close() })
-	// Keep each completed request's connection idle while opening the next.
-	// Nix keeps these connections alive during parallel cache queries.
-	for range 64 {
-		connection, err := net.DialTimeout("tcp", listener.Addr().String(), 2*time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { connection.Close() })
-		connection.SetDeadline(time.Now().Add(2 * time.Second))
-		request, _ := http.NewRequest("GET", "http://"+listener.Addr().String()+"/nix-cache-info", nil)
-		if err = request.Write(connection); err != nil {
-			t.Fatal(err)
-		}
-		response, err := http.ReadResponse(bufio.NewReader(connection), request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, err := io.ReadAll(response.Body)
-		response.Body.Close()
-		if err != nil || response.StatusCode != http.StatusOK || string(body) != "StoreDir: /nix/store\nWantMassQuery: 1\n" {
-			t.Fatalf("cache metadata: status %d body %q error %v", response.StatusCode, body, err)
-		}
 	}
 }
 

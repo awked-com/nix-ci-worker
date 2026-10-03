@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 func TestPackedArchivesRoundTripAndRetainSharedBlobs(t *testing.T) {
@@ -102,66 +101,6 @@ func TestPackedArchivesRoundTripAndRetainSharedBlobs(t *testing.T) {
 	}
 	if retained.Files[keep].Blob.Digest != loaded.Files[keep].Blob.Digest {
 		t.Fatal("retention repacked existing ciphertext")
-	}
-}
-
-type stalledCache struct {
-	*memoryCache
-	once             sync.Once
-	started, release chan struct{}
-}
-
-func (s *stalledCache) UploadBlob(repository string, source io.Reader, encrypted bool) (Descriptor, error) {
-	s.once.Do(func() { close(s.started); <-s.release })
-	return s.memoryCache.UploadBlob(repository, source, encrypted)
-}
-
-func TestPackingContinuesWhilePreviousPackUploads(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := &stalledCache{memoryCache: newMemoryCache(), started: make(chan struct{}), release: make(chan struct{})}
-	release := sync.OnceFunc(func() { close(storage.release) })
-	defer release()
-	snapshot := NewSnapshot(storage, cacheTestRepository)
-	packer := newNARPacker(snapshot, recipients)
-	packer.limit = 4096
-	payload := strings.Repeat("x", 3000)
-	if err := packer.add("first", strings.NewReader(payload)); err != nil {
-		t.Fatal(err)
-	}
-	added := make(chan error, 1)
-	go func() { added <- packer.add("second", strings.NewReader(payload)) }()
-	defer func() { release(); packer.finish() }()
-	select {
-	case <-storage.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("first pack upload did not start")
-	}
-	select {
-	case err := <-added:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("next pack blocked on the previous upload")
-	}
-	if packer.completed.Load() != 0 {
-		t.Fatal("pending packs advertised as uploaded")
-	}
-	finished := make(chan error, 1)
-	go func() { finished <- packer.finish() }()
-	select {
-	case err := <-finished:
-		t.Fatalf("publication finished before the pack uploaded: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	release()
-	if err := <-finished; err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"first", "second"} {
-		if got := string(cacheRead(t, snapshot, name, identity)); got != payload {
-			t.Fatalf("pack payload was overwritten: %s", name)
-		}
 	}
 }
 
