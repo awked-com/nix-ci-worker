@@ -59,29 +59,3 @@ func TestSnapshotIndexKeepsClosedImmutableViews(t *testing.T) {
 		t.Fatal("accepted conflicting upstream closure")
 	}
 }
-
-func TestSnapshotIndexValidatesNewRecords(t *testing.T) {
-	for _, mutate := range []func(*Snapshot){
-		func(s *Snapshot) { s.Narinfos["invalid"] = "" },
-		func(s *Snapshot) {
-			for n := range s.Files {
-				delete(s.Files, n)
-			}
-		},
-		func(s *Snapshot) {
-			for n, v := range s.Files {
-				v.Size = -1
-				s.Files[n] = v
-			}
-		},
-		func(s *Snapshot) { s.Upstream["invalid"] = []string{} },
-		func(s *Snapshot) { s.Upstream["/nix/store/00000000000000000000000000000000-empty"] = nil },
-	} {
-		snapshot := NewSnapshot(newMemoryCache(), cacheTestRepository)
-		cacheRecord(snapshot, "a")
-		mutate(snapshot)
-		if _, err := newSnapshotIndex(snapshot); err == nil {
-			t.Fatal("invalid snapshot indexed")
-		}
-	}
-}

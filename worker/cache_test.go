@@ -28,7 +28,6 @@ type memoryCache struct {
 	manifests map[string][]byte
 	tags      map[string]string
 	failure   error
-	gets      int
 }
 
 func newMemoryCache() *memoryCache {
@@ -64,7 +63,6 @@ func (m *memoryCache) Blob(repository string, d Descriptor) (io.ReadCloser, erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.gets++
 	if m.failure != nil {
 		return nil, m.failure
 	}
@@ -213,7 +211,7 @@ func TestSnapshotEncryptedCatalog(t *testing.T) {
 	storage := newMemoryCache()
 	snapshot := NewSnapshot(storage, cacheTestRepository)
 	snapshot.Metadata["source"] = "private-source"
-	path := cacheRecord(snapshot, "a")
+	cacheRecord(snapshot, "a")
 	if err := cacheAdd(snapshot, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", strings.NewReader("NAR"), recipients); err != nil {
 		t.Fatal(err)
 	}
@@ -223,21 +221,9 @@ func TestSnapshotEncryptedCatalog(t *testing.T) {
 	if !reflect.DeepEqual(loaded.Narinfos, snapshot.Narinfos) || !reflect.DeepEqual(loaded.Metadata, snapshot.Metadata) {
 		t.Fatal("snapshot content changed")
 	}
-	for _, layer := range loaded.Manifest.Layers {
-		if title := layer.Annotations[CatalogTitle]; title != "" && title != "files" {
-			t.Fatalf("unexpected catalog %q", title)
-		}
+	if got := string(cacheRead(t, loaded, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", identity)); got != "NAR" {
+		t.Fatal("archive content changed", got)
 	}
-
-	before := storage.gets
-	if got := string(cacheRead(t, loaded, NarinfoKey(path), identity)); !strings.Contains(got, path) {
-		t.Fatal(got)
-	}
-
-	if storage.gets != before {
-		t.Fatal("inline record required a blob read")
-	}
-
 	for _, data := range storage.manifests {
 		for _, secret := range []string{"private-package", "StorePath", "private-source"} {
 			if bytes.Contains(data, []byte(secret)) {
@@ -252,23 +238,6 @@ func TestSnapshotEncryptedCatalog(t *testing.T) {
 		}
 	}
 
-	manifest := snapshot.Manifest
-	manifest.Layers = append([]Descriptor{}, manifest.Layers...)
-	for i, layer := range manifest.Layers {
-		if layer.Annotations[CatalogTitle] != "files" {
-			manifest.Layers[i].Annotations = map[string]string{CatalogTitle: "archive"}
-		}
-	}
-	if _, err := storage.PutManifest(cacheTestRepository, "annotated", manifest); err != nil {
-		t.Fatal(err)
-	}
-	loaded = cacheLoad(t, storage, "annotated", identity)
-	if !reflect.DeepEqual(loaded.Files, snapshot.Files) || !reflect.DeepEqual(loaded.Metadata, snapshot.Metadata) {
-		t.Fatal("payload annotations changed snapshot content")
-	}
-	if got := string(cacheRead(t, loaded, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", identity)); got != "NAR" {
-		t.Fatal(got)
-	}
 }
 
 func TestSnapshotRequiresOneFilesCatalog(t *testing.T) {

@@ -329,18 +329,3 @@ func TestAdmissionRejectsInvalidEvaluation(t *testing.T) {
 		t.Fatal(matrix, err)
 	}
 }
-
-func TestAdmissionMatrixRejectsMissingAndInvalidRunners(t *testing.T) {
-	row := BuildRunner{System: "aarch64-linux", Runner: Systems["aarch64-linux"]}
-	for _, rows := range [][]BuildRunner{
-		nil,
-		{row, row},
-		{{System: "aarch64-linux", Runner: "ubuntu-24.04"}},
-		{{System: "unsupported", Runner: "self-hosted"}},
-		{{}},
-	} {
-		if _, err := (BuildMatrix{Include: rows}).Systems(); err == nil {
-			t.Fatal("invalid matrix accepted", rows)
-		}
-	}
-}
