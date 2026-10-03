@@ -554,7 +554,7 @@ func Evaluate(source, system string, nix NixFunc, selection map[string]string, l
 			path := ""
 			if out.Path != "" {
 				path = "/nix/store/" + out.Path
-			} else if out.Hash != "" && storePathRE.MatchString(v.Env[key]) {
+			} else if out.Hash != "" && ValidStorePath(v.Env[key]) {
 				path = v.Env[key]
 			}
 

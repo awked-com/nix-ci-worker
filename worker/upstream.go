@@ -20,7 +20,6 @@ import (
 const UpstreamURL = "https://cache.nixos.org"
 const UpstreamPublicKey = "6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
 
-var storePathRE = regexp.MustCompile(`^/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+$`)
 var nix32Hash = regexp.MustCompile(`^sha256:[01][0-9abcdfghijklmnpqrsvwxyz]{51}$`)
 var hexHash = regexp.MustCompile(`^sha256:[0-9a-fA-F]{64}$`)
 
@@ -72,7 +71,7 @@ func verifyUpstreamKey(body []byte, path, key string) ([]string, error) {
 		}
 	}
 
-	if fields["StorePath"] != path || !storePathRE.MatchString(path) {
+	if fields["StorePath"] != path || !ValidStorePath(path) {
 		return nil, errors.New("upstream store path mismatch")
 	}
 
@@ -89,7 +88,7 @@ func verifyUpstreamKey(body []byte, path, key string) ([]string, error) {
 	previous := ""
 	for _, r := range strings.Fields(fields["References"]) {
 		ref := "/nix/store/" + r
-		if !storePathRE.MatchString(ref) || ref <= previous {
+		if !ValidStorePath(ref) || ref <= previous {
 			return nil, errors.New("invalid upstream references")
 		}
 
@@ -149,7 +148,7 @@ func NewUpstream() *Upstream {
 func (u *Upstream) Close() { u.HTTP.CloseIdleConnections() }
 
 func (u *Upstream) Query(path string) ([]string, error) {
-	if !storePathRE.MatchString(path) {
+	if !ValidStorePath(path) {
 		return nil, errors.New("invalid upstream query path")
 	}
 

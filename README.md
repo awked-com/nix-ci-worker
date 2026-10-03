@@ -36,24 +36,6 @@ Use the [CI workflow](https://github.com/awked-com/infra-ci) with Nix on each
 runner. Full builds evaluate `hydraJobs.<system>`; put required systems and checks
 there. Host/package selections follow NixOS configuration attributes.
 
-| Variable | Meaning |
-| --- | --- |
-| `INPUT_MODE` | `admit`, `build` (coordinator), or `builder` (helper) |
-| `INPUT_REQUEST` | Request ID containing 32 lowercase hexadecimal characters |
-| `INPUT_SOURCE` | Source ref used to bind the request |
-| `INPUT_SOURCE_PATH` | Local source checkout; builds use the admitted commit |
-| `INPUT_SYSTEM` | Native system for a coordinator or helper |
-| `INPUT_HOST`, `INPUT_PACKAGE` | Optional host and dotted package selection |
-| `INPUT_BUILDER` | Helper index, starting at 1 |
-| `CI_STORAGE` | JSON object with a `repository` GHCR reference |
-| `CI_IDENTITY` | Age identity bytes, not a filename |
-| `CI_RECIPIENTS` | Newline-separated age recipients |
-| `NIX_SIGNING_KEY` | Final cache signing key for coordinators |
-| `REGISTRY_USER`, `REGISTRY_TOKEN` | Cache registry credentials |
-| `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_RESULTS_URL` | Job-scoped Actions cache credentials |
-| `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` | Actions run identity |
-| `GITHUB_OUTPUT` | Actions output file used by admission |
-
 The storage owner/package must match `GITHUB_REPOSITORY`. Serialize builds for
 that package and retry with the admitted matrices and source revision. Launch
 through a JavaScript action to inherit GitHub’s job-scoped cache credentials.
@@ -64,6 +46,5 @@ Outputs, generations, results, and helper snapshots are retained permanently;
 registry storage grows over time. Publication needs no package Admin access.
 
 Missing or expired coordination messages return work to the coordinator.
-Terminal results include request counts and throttle wait time under `coordination`.
 Build subprocesses receive no credential environment variables; top-level errors
 suppress private failure details.

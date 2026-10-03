@@ -78,7 +78,7 @@ func publicSubstituter(storage Storage, snapshot *Snapshot, identity Secret, pub
 	}
 
 	options := []string{
-		"--substituters", "http://" + listener.Addr().String() + "?priority=50 https://cache.nixos.org",
+		"--substituters", "http://" + listener.Addr().String() + "?priority=50 " + UpstreamURL,
 		"--trusted-public-keys", public + " cache.nixos.org-1:" + UpstreamPublicKey,
 		"--require-sigs",
 		"--option", "fallback", "false",
