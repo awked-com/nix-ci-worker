@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -204,40 +203,6 @@ func cacheLoad(t *testing.T, storage Storage, reference string, identity Secret)
 	}
 
 	return snapshot
-}
-
-func TestSnapshotEncryptedCatalog(t *testing.T) {
-	identity, recipients := cacheKeys(t)
-	storage := newMemoryCache()
-	snapshot := NewSnapshot(storage, cacheTestRepository)
-	snapshot.Metadata["source"] = "private-source"
-	cacheRecord(snapshot, "a")
-	if err := cacheAdd(snapshot, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", strings.NewReader("NAR"), recipients); err != nil {
-		t.Fatal(err)
-	}
-
-	cachePublish(t, snapshot, PlatformTag("aarch64-linux"), recipients)
-	loaded := cacheLoad(t, storage, PlatformTag("aarch64-linux"), identity)
-	if !reflect.DeepEqual(loaded.Narinfos, snapshot.Narinfos) || !reflect.DeepEqual(loaded.Metadata, snapshot.Metadata) {
-		t.Fatal("snapshot content changed")
-	}
-	if got := string(cacheRead(t, loaded, "cache/nar/"+strings.Repeat("a", 64)+".nar.zst", identity)); got != "NAR" {
-		t.Fatal("archive content changed", got)
-	}
-	for _, data := range storage.manifests {
-		for _, secret := range []string{"private-package", "StorePath", "private-source"} {
-			if bytes.Contains(data, []byte(secret)) {
-				t.Fatalf("public manifest leaked %q", secret)
-			}
-		}
-	}
-
-	for _, data := range storage.objects {
-		if !bytes.Equal(data, []byte("{}")) && !bytes.HasPrefix(data, []byte("age-encryption.org/v1\n")) {
-			t.Fatal("plaintext object")
-		}
-	}
-
 }
 
 func TestSnapshotRequiresOneFilesCatalog(t *testing.T) {

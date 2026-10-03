@@ -49,6 +49,18 @@ func TestCatalogLazyLookupAndCiphertextReuse(t *testing.T) {
 	snapshot.Metadata["graph"] = strings.Repeat("private build graph ", 100000)
 	snapshot.Upstream["/nix/store/"+strings.Repeat("z", 32)+"-upstream"] = []string{}
 	first := cachePublish(t, snapshot, "catalog", recipients)
+	for _, data := range storage.manifests {
+		for _, secret := range []string{"-package", "StorePath", "private build graph"} {
+			if bytes.Contains(data, []byte(secret)) {
+				t.Fatalf("public manifest leaked %q", secret)
+			}
+		}
+	}
+	for _, data := range storage.objects {
+		if !bytes.Equal(data, []byte("{}")) && !bytes.HasPrefix(data, []byte("age-encryption.org/v1\n")) {
+			t.Fatal("plaintext object")
+		}
+	}
 	view, err := openCatalog(storage, cacheTestRepository, snapshot.Manifest, first, identity)
 	if err != nil {
 		t.Fatal(err)

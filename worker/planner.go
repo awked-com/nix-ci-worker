@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -141,13 +142,9 @@ func NewPlan(targets map[string]string, derivations map[string]Derivation, requi
 }
 
 func sortedKeys[V any](m map[string]V) []string {
-	r := make([]string, 0, len(m))
-	for k := range m {
-		r = append(r, k)
-	}
-
-	slices.Sort(r)
-	return r
+	keys := slices.AppendSeq(make([]string, 0, len(m)), maps.Keys(m))
+	slices.Sort(keys)
+	return keys
 }
 
 func (p *Plan) Hash() string {

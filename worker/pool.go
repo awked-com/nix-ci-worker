@@ -70,20 +70,6 @@ type poolRecord struct {
 	sent time.Time
 }
 
-type poolRecords struct {
-	sync.Mutex
-	records map[string]*poolRecord
-}
-
-func (r *poolRecords) get(key string) *poolRecord {
-	r.Lock()
-	defer r.Unlock()
-	if r.records[key] == nil {
-		r.records[key] = &poolRecord{}
-	}
-	return r.records[key]
-}
-
 type poolBus struct {
 	controlRecipients       Secret
 	storage                 Storage
@@ -92,7 +78,7 @@ type poolBus struct {
 	attempt                 int
 	identity, recipients    Secret
 	key                     []byte
-	records                 *poolRecords
+	records                 *sync.Map
 }
 
 func newPoolBus(storage Storage, control coordinationStore, repository, run, system string, attempt int, identity, recipients Secret, binding any) (*poolBus, error) {
@@ -115,7 +101,7 @@ func newPoolBus(storage Storage, control coordinationStore, repository, run, sys
 	return &poolBus{
 		storage: storage, control: control, repository: repository, run: run, system: system, attempt: attempt,
 		identity: identity, recipients: recipients, key: mac.Sum(nil), controlRecipients: controlRecipients,
-		records: &poolRecords{records: map[string]*poolRecord{}},
+		records: &sync.Map{},
 	}, nil
 }
 
@@ -148,9 +134,14 @@ func (b *poolBus) authenticate(tag string, data []byte) []byte {
 	return mac.Sum(nil)
 }
 
+func (b *poolBus) record(key string) *poolRecord {
+	record, _ := b.records.LoadOrStore(key, &poolRecord{})
+	return record.(*poolRecord)
+}
+
 func (b *poolBus) write(role string, runner int, message poolMessage) error {
 	prefix := b.prefix(role, runner)
-	record := b.records.get(prefix)
+	record := b.record(prefix)
 	record.Lock()
 	defer record.Unlock()
 	message.Sent = time.Now().UTC()
@@ -177,7 +168,7 @@ func (b *poolBus) write(role string, runner int, message poolMessage) error {
 
 func (b *poolBus) read(role string, runner int) (*poolMessage, error) {
 	prefix := b.prefix(role, runner)
-	record := b.records.get(prefix)
+	record := b.record(prefix)
 	record.Lock()
 	defer record.Unlock()
 	key, encrypted, err := b.control.Read(prefix, record.key)
@@ -257,9 +248,7 @@ func StartBuildPool(bus *poolBus, log io.Writer) *BuildPool {
 func startBuildPool(bus *poolBus, log io.Writer, timing poolTiming) *BuildPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &BuildPool{cpus: runtime.NumCPU(), timing: timing, bus: bus, session: poolNonce(), wake: make(chan struct{}, 1), ctx: ctx, cancel: cancel, log: log}
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.wg.Go(func() {
 		ticker := time.NewTicker(timing.heartbeat)
 		defer ticker.Stop()
 		for {
@@ -281,12 +270,10 @@ func startBuildPool(bus *poolBus, log io.Writer, timing poolTiming) *BuildPool {
 			case <-p.wake:
 			}
 		}
-	}()
+	})
 	for runner := 1; runner < RunnersPerSystem; runner++ {
 		p.changed[runner] = make(chan struct{}, 1)
-		p.wg.Add(1)
-		go func() {
-			defer p.wg.Done()
+		p.wg.Go(func() {
 			ticker := time.NewTicker(timing.poll)
 			defer ticker.Stop()
 			for {
@@ -307,7 +294,7 @@ func startBuildPool(bus *poolBus, log io.Writer, timing poolTiming) *BuildPool {
 				case <-ticker.C:
 				}
 			}
-		}()
+		})
 	}
 	return p
 }

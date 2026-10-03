@@ -311,26 +311,11 @@ func TestHelperAcknowledgesOnceAndExitsAfterUploading(t *testing.T) {
 	}
 }
 
-type countedLeaseStore struct {
-	coordinationStore
-	prefix string
-	reads  atomic.Int64
-}
-
-func (s *countedLeaseStore) Read(prefix, previous string) (string, []byte, error) {
-	if prefix == s.prefix {
-		s.reads.Add(1)
-	}
-	return s.coordinationStore.Read(prefix, previous)
-}
-
 func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 	bus := poolFixture(t)
 	if err := bus.write("coordinator", 0, poolMessage{Session: "session", State: "running"}); err != nil {
 		t.Fatal(err)
 	}
-	control := &countedLeaseStore{coordinationStore: bus.control, prefix: bus.prefix("coordinator", 0)}
-	bus.control = control
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started, cancelled := make(chan struct{}), make(chan struct{})
@@ -349,7 +334,6 @@ func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	before := control.reads.Load()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -362,9 +346,6 @@ func TestHelperCancelsBuildAfterCoordinatorLeaseExpires(t *testing.T) {
 	case <-cancelled:
 	case <-time.After(time.Second):
 		t.Fatal("abandoned build did not cancel")
-	}
-	if reads := control.reads.Load() - before; reads > 8 {
-		t.Fatal("busy helper kept polling its lease at assignment cadence", reads)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,9 +251,7 @@ func PublishStore(source string, required map[string]bool, snapshot, parent *Sna
 		return 0, e
 	}
 
-	for p, refs := range found {
-		snapshot.Upstream[p] = refs
-	}
+	maps.Copy(snapshot.Upstream, found)
 
 	roots := []string{}
 	for _, p := range candidates {
@@ -294,9 +293,7 @@ func PublishStore(source string, required map[string]bool, snapshot, parent *Sna
 			return 0, e
 		}
 
-		for p, v := range values {
-			paths[p] = v
-		}
+		maps.Copy(paths, values)
 	}
 
 	type record struct{ archive, text string }
@@ -352,10 +349,7 @@ func PublishStore(source string, required map[string]bool, snapshot, parent *Sna
 	packer := newNARPacker(snapshot, recipients)
 	uploadStarted := time.Now()
 	for range UploadWorkers {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-
+		group.Go(func() {
 			for item := range pending {
 				if failed.Load() {
 					continue
@@ -385,7 +379,7 @@ func PublishStore(source string, required map[string]bool, snapshot, parent *Sna
 					results <- err
 				}
 			}
-		}()
+		})
 	}
 
 	go func() {

@@ -227,22 +227,20 @@ func (p *BuildPool) schedule(ctx context.Context, graph *Plan, missing []string,
 			sequences[runner]++
 			remote.Sequence = sequences[runner]
 			fmt.Fprintf(p.log, "Assigned build: %s/%d task %d (%d cores)\n", p.bus.system, runner, remote.Sequence, remote.Cores)
-			group.Add(1)
-			go func(runner int, drv string, remote poolMessage) {
-				defer group.Done()
+			drv := selected
+			group.Go(func() {
 				send := func(event poolCompletion) {
 					select {
 					case done <- event:
 					case <-ctx.Done():
 					}
 				}
-				var released sync.Once
-				release := func() {
-					released.Do(func() { send(poolCompletion{runner: runner, sequence: remote.Sequence, drv: drv, released: true}) })
-				}
+				release := sync.OnceFunc(func() {
+					send(poolCompletion{runner: runner, sequence: remote.Sequence, drv: drv, released: true})
+				})
 				err := execute(ctx, runner, specs[drv], remote, release)
 				send(poolCompletion{runner: runner, sequence: remote.Sequence, drv: drv, err: err})
-			}(runner, selected, remote)
+			})
 		}
 		unassigned, active := false, false
 		for drv := range specs {

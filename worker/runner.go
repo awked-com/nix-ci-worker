@@ -443,9 +443,7 @@ func (b nativeBuild) execute() (bool, error) {
 		return false, e
 	}
 
-	for p, refs := range found {
-		delta.Upstream[p] = refs
-	}
+	maps.Copy(delta.Upstream, found)
 
 	fmt.Fprintf(log, "Upstream cache: checked %d paths (%.1fs)\n", len(unknown), time.Since(lookupStarted).Seconds())
 	available, e := CacheUnion(parent, delta)
@@ -688,7 +686,7 @@ func (b nativeBuild) execute() (bool, error) {
 		}
 	}
 
-	for k, v := range map[string]any{
+	maps.Copy(delta.Metadata, map[string]any{
 		"status":                status,
 		"terminal":              true,
 		"results":               results,
@@ -699,9 +697,7 @@ func (b nativeBuild) execute() (bool, error) {
 		"missing_output_groups": len(missing),
 		"minimum_free_bytes":    minimumFree,
 		"new_ciphertext_bytes":  newBytes,
-	} {
-		delta.Metadata[k] = v
-	}
+	})
 
 	if pool != nil {
 		if control, ok := pool.bus.control.(*actionsCache); ok {

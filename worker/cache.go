@@ -127,9 +127,7 @@ func (r *SnapshotReader) refresh() {
 	var group sync.WaitGroup
 	for i, reference := range references {
 		prior := r.views[reference]
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			var digest string
 			var err error
 			view := prior
@@ -157,7 +155,7 @@ func (r *SnapshotReader) refresh() {
 				}
 			}
 			results[i] = result{view, err}
-		}()
+		})
 	}
 	group.Wait()
 	for i, reference := range references {

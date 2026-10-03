@@ -65,26 +65,20 @@ type Descriptor struct {
 }
 
 func (d *Descriptor) UnmarshalJSON(data []byte) error {
-	var value struct {
-		Digest      string            `json:"digest"`
-		Size        *int64            `json:"size"`
-		MediaType   string            `json:"mediaType"`
-		Annotations map[string]string `json:"annotations"`
-	}
+	type descriptor Descriptor
+	decoded := descriptor{}
+	value := struct {
+		*descriptor
+		Size *int64 `json:"size"`
+	}{descriptor: &decoded}
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-
 	if value.Size == nil {
 		return errors.New("missing layer size")
 	}
-
-	*d = Descriptor{
-		Digest:      value.Digest,
-		Size:        *value.Size,
-		MediaType:   value.MediaType,
-		Annotations: value.Annotations,
-	}
+	decoded.Size = *value.Size
+	*d = Descriptor(decoded)
 	return nil
 }
 
